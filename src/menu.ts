@@ -4,11 +4,12 @@ import { handleAdmin, onAdminText } from './admin.ts'
 import { canManage } from './perms.ts'
 import { requestRepoChange } from './repo-change.ts'
 import { analyzeGrants } from './plugin-header.ts'
+import { addScreenshot, checkPhoto, deleteScreenshot, moveScreenshot } from './screenshots.ts'
 import { PublishError, publishVersion, refreshAfterEdit, removePlugin, unpublishVersion, errText } from './publish.ts'
 import * as store from './store.ts'
 import { STATUS_ICON, STATUS_NAME, esc, grantsBlock, when } from './text.ts'
 import { PAGE_SIZE, Stale, clampPage, nav, pagerRow, screen, showHome } from './ui.ts'
-import { cancelWizard, startPublish, wizAction, wizText } from './wizard.ts'
+import { cancelWizard, startPublish, wizAction, wizPhoto, wizText } from './wizard.ts'
 import { descriptionToText, pickDescription, validateAuthor, validateDescription, validateIcon } from './validate.ts'
 
 const num = (s: string | undefined): number => {
@@ -63,6 +64,8 @@ export async function handleCallback(ctx: Context): Promise<string | void> {
       return pluginRoute(ctx, action!, a1, a2)
     case 'v':
       return versionRoute(ctx, action!, num(a1))
+    case 's':
+      return shotRoute(ctx, action!, num(a1), a2)
     case 'a':
       if (!isAdmin(uid)) throw new Stale()
       return handleAdmin(ctx, action!, a1)
@@ -101,6 +104,8 @@ async function pluginRoute(ctx: Context, action: string, a1?: string, a2?: strin
         new InlineKeyboard().text('Отмена', `p:open:${plugin.rid}`),
       )
     }
+    case 'shots':
+      return showShots(ctx, num(a1))
     case 'repo':
       return showRepo(ctx, num(a1))
     case 'repoedit': {
@@ -251,12 +256,89 @@ export async function showPlugin(ctx: Context, rid: number): Promise<void> {
   if (owner) {
     kb.text('Новая версия', `p:newv:${rid}`).text('Описание', `p:desc:${rid}`).row()
     kb.text('Иконка', `p:icon:${rid}`).text('Автор', `p:auth:${rid}`).row()
-    kb.text('🔗 Репозиторий', `p:repo:${rid}`).row()
+    kb.text('🔗 Репозиторий', `p:repo:${rid}`).text('🖼 Скриншоты', `p:shots:${rid}`).row()
   }
+  if (!owner) kb.text('🖼 Скриншоты', `p:shots:${rid}`).row()
   kb.text('Версии', `p:vers:${rid}:0`).text('Удалить', `p:del:${rid}`).row()
   if (isAdmin(ctx.from!.id)) kb.text(plugin.hidden ? '👁 Показать плагин' : '🙈 Скрыть плагин', `p:hide:${rid}`).row()
   nav(kb, owner ? 'p:list:0' : 'a:all:0')
   await screen(ctx, lines.join('\n').replace(/\n{3,}/g, '\n\n'), kb)
+}
+
+async function shotRoute(ctx: Context, action: string, rid: number, arg?: string): Promise<string | void> {
+  const { plugin, owner } = await accessible(ctx, rid)
+  const shotOf = async () => {
+    const shot = await store.getScreenshot(num(arg))
+    if (!shot || shot.pluginId !== plugin.id) throw new Stale()
+    return shot
+  }
+  switch (action) {
+    case 'add': {
+      if (!owner) throw new Stale()
+      const count = (await store.listScreenshots(plugin.id)).length
+      if (count >= store.MAX_SCREENSHOTS) return `Уже ${store.MAX_SCREENSHOTS} скриншотов — это максимум`
+      await store.setSession(ctx.from!.id, 'shots', { rid })
+      return screen(
+        ctx,
+        `<b>${esc(plugin.name)}</b>\nПришлите скриншоты как фото (не файлом): до 10 МБ, меньшая сторона не менее 320 px. Можно несколько подряд. Сейчас ${count}/${store.MAX_SCREENSHOTS}.`,
+        new InlineKeyboard().text('Готово', `p:shots:${rid}`),
+      )
+    }
+    case 'view': {
+      const list = await store.listScreenshots(plugin.id)
+      if (!list.length) return 'Скриншотов нет'
+      if (list.length === 1) await ctx.replyWithPhoto(list[0]!.fileId)
+      else await ctx.replyWithMediaGroup(list.map((s) => ({ type: 'photo' as const, media: s.fileId })))
+      return
+    }
+    case 'left':
+    case 'right': {
+      if (!owner) throw new Stale()
+      const shot = await shotOf()
+      await moveScreenshot(ctx.api, plugin, shot.id, action === 'left' ? -1 : 1)
+      return showShots(ctx, rid)
+    }
+    case 'del': {
+      const shot = await shotOf()
+      return screen(
+        ctx,
+        `Удалить скриншот №${shot.position + 1} плагина <b>${esc(plugin.name)}</b>? Фото будет удалено из канала.`,
+        new InlineKeyboard().text('Да, удалить', `s:delok:${rid}:${shot.id}`).text('Нет', `p:shots:${rid}`),
+      )
+    }
+    case 'delok': {
+      const shot = await shotOf()
+      try {
+        await deleteScreenshot(ctx.api, shot)
+      } catch (e) {
+        if (e instanceof PublishError) return e.message
+        throw e
+      }
+      return showShots(ctx, rid)
+    }
+  }
+  throw new Stale()
+}
+
+async function showShots(ctx: Context, rid: number): Promise<void> {
+  const { plugin, owner } = await accessible(ctx, rid)
+  const list = await store.listScreenshots(plugin.id)
+  const lines = [
+    `<b>${esc(plugin.name)}</b> — скриншоты (${list.length}/${store.MAX_SCREENSHOTS})`,
+    list.length ? list.map((s, i) => `${i + 1}. ${s.msgId !== null ? '✅ в канале' : '⏳ ждёт одобрения плагина'}`).join('\n') : 'Скриншотов пока нет.',
+  ]
+  const kb = new InlineKeyboard()
+  list.forEach((s, i) => {
+    kb.text(`#${i + 1}`, 'x:noop')
+    if (owner && i > 0) kb.text('◀', `s:left:${rid}:${s.id}`)
+    if (owner && i < list.length - 1) kb.text('▶', `s:right:${rid}:${s.id}`)
+    kb.text('🗑', `s:del:${rid}:${s.id}`).row()
+  })
+  if (owner && list.length < store.MAX_SCREENSHOTS) kb.text('➕ Добавить', `s:add:${rid}`)
+  if (list.length) kb.text('👁 Показать', `s:view:${rid}`)
+  kb.row()
+  nav(kb, `p:open:${rid}`)
+  await screen(ctx, lines.join('\n'), kb)
 }
 
 async function showRepo(ctx: Context, rid: number): Promise<void> {
@@ -322,6 +404,31 @@ async function showVersion(ctx: Context, vrid: number): Promise<void> {
   kb.text('Удалить', `v:del:${vrid}`).row()
   nav(kb, `p:vers:${plugin.rid}:0`)
   await screen(ctx, lines.filter(Boolean).join('\n'), kb)
+}
+
+// ---- photos
+
+export async function handlePhoto(ctx: Context): Promise<void> {
+  const uid = ctx.from!.id
+  const s = await store.getSession(uid)
+  if (s?.state === 'wiz') return wizPhoto(ctx, s.payload)
+  if (s?.state === 'shots') {
+    const { plugin, owner } = await accessible(ctx, s.payload.rid)
+    if (!owner) throw new Stale()
+    const check = checkPhoto(ctx.message!.photo)
+    if (!check.ok) return void (await ctx.reply(`❌ ${check.error}`))
+    const r = await addScreenshot(ctx.api, plugin, check)
+    if (r.kind === 'error') return void (await ctx.reply(`⚠️ ${r.message}`))
+    await store.setSession(uid, 'shots', s.payload) // keeps the 15 minute window open while photos keep coming
+    await ctx.reply(
+      `✅ Добавлено (${r.count}/${store.MAX_SCREENSHOTS})${r.published ? '' : ' — появится в канале после одобрения плагина'}.`,
+      { reply_markup: new InlineKeyboard().text('Готово', `p:shots:${plugin.rid}`) },
+    )
+    return
+  }
+  await ctx.reply('Скриншоты добавляются в мастере публикации или в экране плагина → «Скриншоты».', {
+    reply_markup: new InlineKeyboard().text('⌂ Меню', 'm:home'),
+  })
 }
 
 // ---- free text

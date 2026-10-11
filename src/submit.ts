@@ -28,6 +28,8 @@ export interface SubmitInput {
   fields: Fields
   /** non-blocking note from the reachability check, for moderators */
   repoWarning?: string | null
+  /** photos from the wizard; only stored for a plugin that is being created */
+  screenshots?: store.WizShot[]
 }
 
 export type SubmitResult =
@@ -97,6 +99,10 @@ export async function submit(api: Api, input: SubmitInput): Promise<SubmitResult
     repoWarning: input.repoWarning ?? null,
   })
   if (!created && (await store.getPlugin(f.id))?.owner !== userId) return { kind: 'error', message: `id «${f.id}» уже занят другим автором` }
+
+  if (created) {
+    for (const s of (input.screenshots ?? []).slice(0, store.MAX_SCREENSHOTS)) await store.addScreenshot(f.id, s.id, s.u)
+  }
 
   if (!created && repoIsNew) {
     // legacy plugin gets its first repository together with this version
@@ -173,8 +179,12 @@ export async function notifyModerators(api: Api, v: store.Version, reasons: stri
   const cfg = config()
   const targets = cfg.modChatId ? [cfg.modChatId] : cfg.adminIds
   const sent: store.ModMsg[] = []
+  const shots = await store.listScreenshots(v.pluginId)
   for (const chat of targets) {
     try {
+      // the moderator sees the photos together with the request; nothing is in the channel yet
+      if (shots.length === 1) await api.sendPhoto(chat, shots[0]!.fileId, { caption: `🖼 Скриншот: ${p.name}` })
+      else if (shots.length > 1) await api.sendMediaGroup(chat, shots.map((s) => ({ type: 'photo' as const, media: s.fileId })))
       const m = await api.sendDocument(chat, v.fileId, {
         caption: modCard(v, p, reasons),
         parse_mode: 'HTML',
@@ -227,6 +237,7 @@ export async function reject(api: Api, rid: number, reason: string, modName: str
   const v = await store.getVersion(rid)
   if (!v || v.status !== 'pending') return { ok: false, message: 'Заявка уже обработана' }
   await store.setVersionStatus(rid, 'rejected', { rejectReason: reason })
+  await store.dropPendingScreenshots(v.pluginId) // staged photos of a rejected first publication never reach the channel
   await closeModCards(api, v, `❌ Отклонено ${esc(modName)}: ${esc(reason)}`)
   await api
     .sendMessage(v.submitter, `❌ Версия ${v.pluginId} ${v.version} отклонена.\nПричина: ${reason}`)

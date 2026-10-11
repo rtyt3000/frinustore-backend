@@ -5574,7 +5574,7 @@ function maxSemver(versions) {
 
 // src/catalog.ts
 var MAX_CATALOG_BYTES = 1024 * 1024;
-function buildCatalog(plugins, versions, installs, now) {
+function buildCatalog(plugins, versions, installs, now, screenshots = new Map) {
   const out = [];
   for (const p of plugins) {
     if (p.hidden || !p.repo)
@@ -5589,6 +5589,7 @@ function buildCatalog(plugins, versions, installs, now) {
     });
     if (!vs.length)
       continue;
+    const shots = (screenshots.get(p.id) ?? []).slice(0, 8);
     out.push({
       id: p.id,
       name: p.name,
@@ -5596,6 +5597,7 @@ function buildCatalog(plugins, versions, installs, now) {
       description: p.description,
       icon: p.icon,
       repo: p.repo,
+      ...shots.length ? { screenshots: shots } : {},
       installs: installs.get(p.id) ?? 0,
       versions: vs
     });
@@ -10689,6 +10691,7 @@ function log(level, msg, extra = {}) {
 }
 
 // src/store.ts
+var MAX_SCREENSHOTS = 8;
 var plugin = (r) => ({
   rid: Number(r.rid),
   id: r.id,
@@ -10701,6 +10704,14 @@ var plugin = (r) => ({
   repoWarning: r.repo_warning ?? null,
   hidden: r.hidden,
   createdAt: Number(r.created_at)
+});
+var screenshot = (r) => ({
+  id: Number(r.id),
+  pluginId: r.plugin_id,
+  position: Number(r.position),
+  msgId: r.msg_id === null ? null : Number(r.msg_id),
+  fileId: r.file_id,
+  uniqueId: r.file_unique_id
 });
 var repoChange = (r) => ({
   id: Number(r.id),
@@ -10796,6 +10807,90 @@ async function listPlugins(opts) {
 }
 async function allPlugins() {
   return (await q("SELECT * FROM plugins ORDER BY rid")).map(plugin);
+}
+async function listScreenshots(pluginId) {
+  return (await q("SELECT * FROM screenshots WHERE plugin_id = $1 ORDER BY position, id", [pluginId])).map(screenshot);
+}
+async function getScreenshot(id) {
+  const r = await one("SELECT * FROM screenshots WHERE id = $1", [id]);
+  return r && screenshot(r);
+}
+async function publishedScreenshots() {
+  const rows = await q("SELECT plugin_id, msg_id FROM screenshots WHERE msg_id IS NOT NULL ORDER BY plugin_id, position, id");
+  const out = new Map;
+  for (const r of rows)
+    out.set(r.plugin_id, [...out.get(r.plugin_id) ?? [], Number(r.msg_id)]);
+  return out;
+}
+async function addScreenshot(pluginId, fileId, uniqueId) {
+  const r = await one(`INSERT INTO screenshots (plugin_id, position, file_id, file_unique_id, created_at)
+     SELECT $1, COALESCE((SELECT max(position) + 1 FROM screenshots WHERE plugin_id = $1), 0), $2, $3, $4
+     WHERE (SELECT count(*) FROM screenshots WHERE plugin_id = $1) < $5
+     ON CONFLICT (plugin_id, file_unique_id) DO NOTHING RETURNING *`, [pluginId, fileId, uniqueId, now(), MAX_SCREENSHOTS]);
+  if (r)
+    return { ok: true, shot: screenshot(r) };
+  const dup = await one("SELECT 1 FROM screenshots WHERE plugin_id = $1 AND file_unique_id = $2", [pluginId, uniqueId]);
+  return { ok: false, reason: dup ? "duplicate" : "full" };
+}
+async function setScreenshotMsg(id, msgId) {
+  await q("UPDATE screenshots SET msg_id = $2 WHERE id = $1", [id, msgId]);
+}
+async function normalizeScreenshots(pluginId) {
+  await q(`UPDATE screenshots s SET position = r.n FROM
+       (SELECT id, row_number() OVER (ORDER BY position, id) - 1 AS n FROM screenshots WHERE plugin_id = $1) r
+     WHERE s.id = r.id AND s.position <> r.n`, [pluginId]);
+}
+async function removeScreenshot(id) {
+  const r = await one("DELETE FROM screenshots WHERE id = $1 RETURNING *", [id]);
+  if (!r)
+    return null;
+  const shot = screenshot(r);
+  await normalizeScreenshots(shot.pluginId);
+  return shot;
+}
+async function restoreScreenshot(shot) {
+  await q("UPDATE screenshots SET position = position + 1 WHERE plugin_id = $1 AND position >= $2", [shot.pluginId, shot.position]);
+  await q(`INSERT INTO screenshots (plugin_id, position, msg_id, file_id, file_unique_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (plugin_id, file_unique_id) DO NOTHING`, [shot.pluginId, shot.position, shot.msgId, shot.fileId, shot.uniqueId, now()]);
+}
+async function moveScreenshot(pluginId, id, dir) {
+  await normalizeScreenshots(pluginId);
+  const list = await listScreenshots(pluginId);
+  const i = list.findIndex((s) => s.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length)
+    return false;
+  await q("UPDATE screenshots SET position = CASE id WHEN $1 THEN $3::int WHEN $2 THEN $4::int END WHERE id IN ($1, $2)", [
+    list[i].id,
+    list[j].id,
+    list[j].position,
+    list[i].position
+  ]);
+  return true;
+}
+async function dropPendingScreenshots(pluginId) {
+  await q(`DELETE FROM screenshots WHERE plugin_id = $1 AND msg_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = $1 AND status IN ('pending', 'publishing', 'approved', 'hidden'))`, [pluginId]);
+}
+async function appendWizardShot(userId, shot) {
+  const r = await one(`UPDATE sessions SET payload_json = jsonb_set(payload_json, '{shots}', COALESCE(payload_json->'shots', '[]'::jsonb) || $2::jsonb), updated_at = $4
+     WHERE user_id = $1 AND state = 'wiz'
+       AND jsonb_array_length(COALESCE(payload_json->'shots', '[]'::jsonb)) < $3
+       AND NOT (COALESCE(payload_json->'shots', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('u', $5::text)))
+     RETURNING payload_json`, [userId, JSON.stringify([shot]), MAX_SCREENSHOTS, now(), shot.u]);
+  if (r)
+    return { ok: true, shots: r.payload_json.shots, payload: r.payload_json };
+  const s = await one("SELECT payload_json FROM sessions WHERE user_id = $1 AND state = 'wiz'", [userId]);
+  if (!s)
+    return { ok: false, reason: "gone" };
+  const shots = s.payload_json.shots ?? [];
+  return { ok: false, reason: shots.some((x2) => x2.u === shot.u) ? "duplicate" : "full" };
+}
+async function saveWizard(userId, payload) {
+  await q(`INSERT INTO sessions (user_id, state, payload_json, updated_at) VALUES ($1, 'wiz', $2::jsonb, $3)
+     ON CONFLICT (user_id) DO UPDATE SET state = 'wiz', updated_at = EXCLUDED.updated_at,
+       payload_json = EXCLUDED.payload_json || jsonb_build_object('shots',
+         CASE WHEN sessions.state = 'wiz' THEN COALESCE(sessions.payload_json->'shots', '[]'::jsonb) ELSE '[]'::jsonb END)`, [userId, JSON.stringify(payload), now()]);
 }
 async function createRepoChange(pluginId, repoUrl, warning, submitter) {
   const r = await one(`INSERT INTO repo_changes (plugin_id, repo_url, warning, status, submitter_id, created_at)
@@ -10950,7 +11045,7 @@ async function enqueueJob(type) {
 }
 async function dumpAll() {
   const out = {};
-  for (const t of ["users", "plugins", "versions", "repo_changes", "installs", "meta", "sessions"]) {
+  for (const t of ["users", "plugins", "versions", "repo_changes", "screenshots", "installs", "meta", "sessions"]) {
     out[t] = await q(`SELECT * FROM ${t}`);
   }
   return out;
@@ -10983,7 +11078,7 @@ async function writeCatalogMessage(api, json) {
   await setMeta("catalog_msg_id", String(sent.message_id));
 }
 async function rebuildLocked(api, force) {
-  const [plugins, versions, installs] = await Promise.all([allPlugins(), allVersions(), installCounts()]);
+  const [plugins, versions, installs, shots] = await Promise.all([allPlugins(), allVersions(), installCounts(), publishedScreenshots()]);
   const catalog = buildCatalog(plugins.map((p2) => ({ id: p2.id, name: p2.name, author: p2.author, description: p2.description, icon: p2.icon, repo: p2.repoUrl, hidden: p2.hidden })), versions.map((v2) => ({
     pluginId: v2.pluginId,
     version: v2.version,
@@ -10992,7 +11087,7 @@ async function rebuildLocked(api, force) {
     changelog: v2.changelog,
     grants: v2.grants,
     status: v2.status
-  })), installs, now());
+  })), installs, now(), shots);
   const fingerprint = catalogFingerprint(catalog);
   if (!force && await getMeta("catalog_hash") === fingerprint && await getMeta("catalog_msg_id"))
     return false;
@@ -11021,6 +11116,36 @@ ${id}`;
 
 class PublishError extends Error {
 }
+var shotCaption = (pluginId) => `#screenshot ${pluginId}`;
+async function publishOneScreenshot(api, pluginId, shot) {
+  const sent = await api.sendPhoto(config().channelId, shot.fileId, { caption: shotCaption(pluginId), disable_notification: true });
+  await setScreenshotMsg(shot.id, sent.message_id);
+  shot.msgId = sent.message_id;
+  return sent.message_id;
+}
+async function discardScreenshots(api, shots) {
+  for (const s of shots) {
+    if (s.msgId !== null)
+      await deleteChannelMessage(api, s.msgId).catch(() => {});
+    await setScreenshotMsg(s.id, null).catch(() => {});
+    s.msgId = null;
+  }
+}
+async function sendPendingScreenshots(api, pluginId) {
+  const sent = [];
+  try {
+    for (const s of await listScreenshots(pluginId)) {
+      if (s.msgId !== null)
+        continue;
+      await publishOneScreenshot(api, pluginId, s);
+      sent.push(s);
+    }
+    return sent;
+  } catch (e) {
+    await discardScreenshots(api, sent);
+    throw e;
+  }
+}
 async function publishVersion(api, rid, from) {
   const v2 = await claimVersion(rid, from);
   if (!v2)
@@ -11032,16 +11157,19 @@ async function publishVersion(api, rid, from) {
   }
   const chat = config().channelId;
   let msgId;
+  let shots = [];
   try {
     const sent = await api.sendDocument(chat, v2.fileId, { caption: caption(p2.name, v2.version, p2.id), disable_notification: true });
     msgId = sent.message_id;
     await setVersionStatus(rid, "approved", { msgId, date: now() });
+    shots = await sendPendingScreenshots(api, p2.id);
     const r = await refreshCatalog(api);
     return { queued: r === "queued" };
   } catch (e) {
     log("error", "publish failed", { rid, error: errText(e) });
     if (msgId !== undefined)
       await api.deleteMessage(chat, msgId).catch(() => {});
+    await discardScreenshots(api, shots);
     await setVersionStatus(rid, from, { msgId: null }).catch(() => {});
     throw new PublishError(`\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C: ${errText(e)}`);
   }
@@ -11061,9 +11189,10 @@ async function unpublishVersion(api, rid, mode) {
   if (!v2)
     return;
   if (v2.status !== "approved") {
-    if (mode === "delete")
+    if (mode === "delete") {
       await deleteVersion(rid);
-    else
+      await dropPendingScreenshots(v2.pluginId);
+    } else
       await setVersionStatus(rid, "hidden");
     return;
   }
@@ -11083,6 +11212,7 @@ async function removePlugin(api, pluginId) {
   if (!p2)
     return;
   const { rows } = await listVersions(pluginId);
+  const shots = await listScreenshots(pluginId);
   await updatePlugin(pluginId, { hidden: true });
   const r = await refreshCatalog(api, { waitMs: 20000 });
   if (r === "queued") {
@@ -11091,6 +11221,8 @@ async function removePlugin(api, pluginId) {
   }
   for (const v2 of rows)
     await deleteChannelMessage(api, v2.msgId);
+  for (const s of shots)
+    await deleteChannelMessage(api, s.msgId);
   await deletePlugin(pluginId);
 }
 async function refreshAfterEdit(api) {
@@ -11406,6 +11538,10 @@ async function submit(api, input) {
   });
   if (!created && (await getPlugin(f.id))?.owner !== userId)
     return { kind: "error", message: `id \xAB${f.id}\xBB \u0443\u0436\u0435 \u0437\u0430\u043D\u044F\u0442 \u0434\u0440\u0443\u0433\u0438\u043C \u0430\u0432\u0442\u043E\u0440\u043E\u043C` };
+  if (created) {
+    for (const s of (input.screenshots ?? []).slice(0, MAX_SCREENSHOTS))
+      await addScreenshot(f.id, s.id, s.u);
+  }
   if (!created && repoIsNew) {
     await updatePlugin(f.id, { repoUrl: repo, repoWarning: input.repoWarning ?? null });
     refreshCatalog(api, { waitMs: 0 }).catch(() => {});
@@ -11475,8 +11611,13 @@ async function notifyModerators2(api, v2, reasons) {
   const cfg = config();
   const targets = cfg.modChatId ? [cfg.modChatId] : cfg.adminIds;
   const sent = [];
+  const shots = await listScreenshots(v2.pluginId);
   for (const chat of targets) {
     try {
+      if (shots.length === 1)
+        await api.sendPhoto(chat, shots[0].fileId, { caption: `\uD83D\uDDBC \u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442: ${p2.name}` });
+      else if (shots.length > 1)
+        await api.sendMediaGroup(chat, shots.map((s) => ({ type: "photo", media: s.fileId })));
       const m = await api.sendDocument(chat, v2.fileId, {
         caption: modCard(v2, p2, reasons),
         parse_mode: "HTML",
@@ -11528,6 +11669,7 @@ async function reject(api, rid, reason, modName) {
   if (!v2 || v2.status !== "pending")
     return { ok: false, message: "\u0417\u0430\u044F\u0432\u043A\u0430 \u0443\u0436\u0435 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u0430" };
   await setVersionStatus(rid, "rejected", { rejectReason: reason });
+  await dropPendingScreenshots(v2.pluginId);
   await closeModCards(api, v2, `\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E ${esc(modName)}: ${esc(reason)}`);
   await api.sendMessage(v2.submitter, `\u274C \u0412\u0435\u0440\u0441\u0438\u044F ${v2.pluginId} ${v2.version} \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0430.
 \u041F\u0440\u0438\u0447\u0438\u043D\u0430: ${reason}`).catch(() => {});
@@ -11844,6 +11986,55 @@ function canManage(userId, ownerId, admin) {
   return { allowed: owner || admin, owner };
 }
 
+// src/screenshots.ts
+var MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+var MIN_SIDE = 320;
+function checkPhoto(sizes) {
+  if (!sizes?.length)
+    return { ok: false, error: "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u043A\u0430\u043A \u0444\u043E\u0442\u043E (\u043D\u0435 \u0444\u0430\u0439\u043B\u043E\u043C \u0438 \u043D\u0435 \u0441\u0442\u0438\u043A\u0435\u0440\u043E\u043C)" };
+  const best = sizes.reduce((a2, b2) => b2.width * b2.height > a2.width * a2.height ? b2 : a2);
+  if (best.file_size !== undefined && best.file_size > MAX_PHOTO_BYTES)
+    return { ok: false, error: "\u0424\u043E\u0442\u043E \u0431\u043E\u043B\u044C\u0448\u0435 10 \u041C\u0411" };
+  if (Math.min(best.width, best.height) < MIN_SIDE)
+    return { ok: false, error: `\u041C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u0430\u044F \u0441\u0442\u043E\u0440\u043E\u043D\u0430 \u0444\u043E\u0442\u043E \u2014 ${MIN_SIDE} px (\u0443 \u044D\u0442\u043E\u0433\u043E ${Math.min(best.width, best.height)})` };
+  return { ok: true, fileId: best.file_id, uniqueId: best.file_unique_id };
+}
+async function addScreenshot2(api, plugin2, photo) {
+  const added = await addScreenshot(plugin2.id, photo.fileId, photo.uniqueId);
+  if (!added.ok) {
+    return { kind: "error", message: added.reason === "full" ? `\u0423\u0436\u0435 ${MAX_SCREENSHOTS} \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u2014 \u044D\u0442\u043E \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C` : "\u042D\u0442\u043E\u0442 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u0443\u0436\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D" };
+  }
+  const live = await hasApproved(plugin2.id);
+  if (live) {
+    try {
+      await publishOneScreenshot(api, plugin2.id, added.shot);
+      await refreshCatalog(api);
+    } catch (e) {
+      await discardScreenshots(api, [added.shot]);
+      await removeScreenshot(added.shot.id);
+      return { kind: "error", message: `\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442: ${e instanceof Error ? e.message : e}` };
+    }
+  }
+  return { kind: "added", count: (await listScreenshots(plugin2.id)).length, published: live };
+}
+async function deleteScreenshot(api, shot) {
+  const removed = await removeScreenshot(shot.id);
+  if (!removed)
+    return;
+  if (removed.msgId !== null) {
+    const r = await refreshCatalog(api, { waitMs: 20000 });
+    if (r === "queued") {
+      await restoreScreenshot(removed);
+      throw new PublishError("\u041A\u0430\u0442\u0430\u043B\u043E\u0433 \u0441\u0435\u0439\u0447\u0430\u0441 \u043E\u0431\u043D\u043E\u0432\u043B\u044F\u0435\u0442\u0441\u044F, \u043F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043C\u0438\u043D\u0443\u0442\u0443");
+    }
+    await deleteChannelMessage(api, removed.msgId);
+  }
+}
+async function moveScreenshot2(api, plugin2, id, dir) {
+  if (await moveScreenshot(plugin2.id, id, dir))
+    await refreshCatalog(api);
+}
+
 // src/wizard.ts
 var import_grammy6 = __toESM(require_mod(), 1);
 import { createHash } from "crypto";
@@ -11928,7 +12119,7 @@ function pickDescription(d) {
 }
 
 // src/wizard.ts
-var NEW_STEPS = ["id", "name", "version", "description", "repo", "icon", "changelog"];
+var NEW_STEPS = ["id", "name", "version", "description", "repo", "icon", "screenshots", "changelog"];
 var EXISTING_STEPS = ["id", "version", "changelog"];
 var LEGACY_STEPS = ["id", "repo", "version", "changelog"];
 var CONFIRM = "\x01";
@@ -11939,6 +12130,7 @@ var LABEL = {
   description: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435",
   repo: "\u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439",
   icon: "\u0418\u043A\u043E\u043D\u043A\u0430",
+  screenshots: "\u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B",
   changelog: "Changelog"
 };
 var HINT = {
@@ -11948,9 +12140,10 @@ var HINT = {
   description: "\u0414\u043E 500 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432. \u041C\u043E\u0436\u043D\u043E \u043F\u043E \u044F\u0437\u044B\u043A\u0430\u043C: \u0441\u0442\u0440\u043E\u043A\u0438 \xABru: \u2026\xBB \u0438 \xABen: \u2026\xBB. \u041F\u0443\u0441\u0442\u043E\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E.",
   repo: "\u0421\u0441\u044B\u043B\u043A\u0430 \u043D\u0430 \u043F\u0443\u0431\u043B\u0438\u0447\u043D\u044B\u0439 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u0441 \u0438\u0441\u0445\u043E\u0434\u043D\u0438\u043A\u0430\u043C\u0438: https://github.com/\u0430\u0432\u0442\u043E\u0440/\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea). \u041E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E.",
   icon: "inu://\u0438\u043C\u044F, tg://emoji?id=\u2026 \u0438\u043B\u0438 tg://addstickers?set=\u2026",
+  screenshots: "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043E\u0442 1 \u0434\u043E 8 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u043A\u0430\u043A \u0444\u043E\u0442\u043E (\u043D\u0435 \u0444\u0430\u0439\u043B\u043E\u043C): \u0434\u043E 10 \u041C\u0411, \u043C\u0435\u043D\u044C\u0448\u0430\u044F \u0441\u0442\u043E\u0440\u043E\u043D\u0430 \u043D\u0435 \u043C\u0435\u043D\u0435\u0435 320 px. \u0428\u0430\u0433 \u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439; \u043F\u043E\u0437\u0436\u0435 \u0438\u0445 \u043C\u043E\u0436\u043D\u043E \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0432 \u044D\u043A\u0440\u0430\u043D\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u0430.",
   changelog: "\u0414\u043E 300 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432, \u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E."
 };
-var OPTIONAL = ["description", "changelog"];
+var OPTIONAL = ["description", "screenshots", "changelog"];
 async function startPublish(ctx, pluginRid) {
   const uid = ctx.from.id;
   let title = "<b>\u041F\u0443\u0431\u043B\u0438\u043A\u0430\u0446\u0438\u044F \u043F\u043B\u0430\u0433\u0438\u043D\u0430</b>";
@@ -11975,6 +12168,11 @@ async function onDocument(ctx) {
   const session = await getSession(uid);
   const pluginRid = session?.state === "await_file" ? session.payload.pluginRid : undefined;
   const reject2 = (msg) => ctx.reply(`\u274C ${msg}`, { reply_markup: nav(new import_grammy6.InlineKeyboard) });
+  if (doc.mime_type?.startsWith("image/")) {
+    const inShots = session?.state === "shots" || session?.state === "wiz" && session.payload.steps[session.payload.i] === "screenshots";
+    if (inShots)
+      return void await reject2("\u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B \u043D\u0443\u0436\u043D\u043E \u043F\u0440\u0438\u0441\u044B\u043B\u0430\u0442\u044C \u043A\u0430\u043A \u0444\u043E\u0442\u043E (\u0441\u043E \u0441\u0436\u0430\u0442\u0438\u0435\u043C), \u0430 \u043D\u0435 \u0444\u0430\u0439\u043B\u043E\u043C");
+  }
   if (!/\.inu\.js$/i.test(doc.file_name ?? ""))
     return void await reject2("\u041D\u0443\u0436\u0435\u043D \u0444\u0430\u0439\u043B \u0441 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u0435\u043C .inu.js");
   if ((doc.file_size ?? 0) > MAX_FILE_BYTES)
@@ -12038,12 +12236,14 @@ async function adoptExisting(w, p2) {
   w.f.version = hv && validateVersion(hv).ok && (!top || compareSemver(hv, top) > 0) ? hv : undefined;
 }
 async function save(ctx, w) {
-  await setSession(ctx.from.id, "wiz", w);
+  await saveWizard(ctx.from.id, w);
 }
 async function renderStep(ctx, w, notice) {
   const step = w.steps[w.i];
   if (!step)
     return renderCard(ctx, w);
+  if (step === "screenshots")
+    return renderShots(ctx, w, notice);
   const value = w.f[step];
   const optional = OPTIONAL.includes(step);
   const prompt = !value && !optional ? true : w.awaiting;
@@ -12080,6 +12280,40 @@ ${HINT[step]}`;
   kb.row().text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel");
   await save(ctx, w);
   await screen(ctx, text, kb);
+}
+async function renderShots(ctx, w, notice) {
+  const n = w.shots?.length ?? 0;
+  const text = `${notice ? `\u26A0\uFE0F ${esc(notice)}
+
+` : ""}<b>\u0428\u0430\u0433 ${w.i + 1}/${w.steps.length}: ${LABEL.screenshots}</b>
+${HINT.screenshots}
+
+\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E: ${n}/${MAX_SCREENSHOTS}`;
+  const kb = new import_grammy6.InlineKeyboard;
+  if (n)
+    kb.text("\u0413\u043E\u0442\u043E\u0432\u043E", "w:shotsdone");
+  else
+    kb.text("\u041F\u0440\u043E\u043F\u0443\u0441\u0442\u0438\u0442\u044C", "w:skip");
+  kb.row().text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel");
+  w.awaiting = false;
+  await save(ctx, w);
+  await screen(ctx, text, kb);
+}
+async function wizPhoto(ctx, w) {
+  if (w.steps[w.i] !== "screenshots") {
+    await ctx.reply("\u0421\u0435\u0439\u0447\u0430\u0441 \u0444\u043E\u0442\u043E \u043D\u0435 \u043D\u0443\u0436\u043D\u044B. \u0421\u043B\u0435\u0434\u0443\u0439\u0442\u0435 \u0448\u0430\u0433\u0430\u043C \u043C\u0430\u0441\u0442\u0435\u0440\u0430 \u0438\u043B\u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041E\u0442\u043C\u0435\u043D\u0430\xBB.");
+    return;
+  }
+  const check = checkPhoto(ctx.message.photo);
+  if (!check.ok)
+    return void await ctx.reply(`\u274C ${check.error}`);
+  const r = await appendWizardShot(ctx.from.id, { id: check.fileId, u: check.uniqueId });
+  if (!r.ok) {
+    const why = { full: `\u0423\u0436\u0435 ${MAX_SCREENSHOTS} \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u2014 \u044D\u0442\u043E \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C`, duplicate: "\u042D\u0442\u043E\u0442 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u0443\u0436\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D", gone: "\u041C\u0430\u0441\u0442\u0435\u0440 \u0437\u0430\u043A\u0440\u044B\u0442, \u043D\u0430\u0447\u043D\u0438\u0442\u0435 \u0437\u0430\u043D\u043E\u0432\u043E" }[r.reason];
+    return void await ctx.reply(`\u26A0\uFE0F ${why}`);
+  }
+  w.shots = r.shots;
+  await renderStep(ctx, w);
 }
 async function applyStep(ctx, w, step, raw) {
   const uid = ctx.from.id;
@@ -12141,6 +12375,8 @@ async function applyStep(ctx, w, step, raw) {
       w.f.repo = v2.value;
       return null;
     }
+    case "screenshots":
+      return null;
     case "icon": {
       const v2 = validateIcon(raw);
       if (!v2.ok)
@@ -12189,6 +12425,11 @@ async function wizAction(ctx, action) {
       w.awaiting = false;
       return renderStep(ctx, w);
     }
+    case "shotsdone":
+      if (step !== "screenshots")
+        throw new Stale;
+      w.i++;
+      return renderStep(ctx, w);
     case "go":
       return publish(ctx, w);
     default:
@@ -12252,6 +12493,7 @@ async function renderCard(ctx, w) {
     `id: <code>${esc(f.id)}</code>`,
     `\u0430\u0432\u0442\u043E\u0440: ${esc(f.author)}`,
     `\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439: ${esc(f.repo)}`,
+    w.shots?.length ? `\u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B: ${w.shots.length}` : "",
     `\u0438\u043A\u043E\u043D\u043A\u0430: <code>${esc(f.icon)}</code>`,
     w.f.description ? `\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435: ${esc(w.f.description)}` : "",
     f.changelog ? `changelog: ${esc(f.changelog)}` : "",
@@ -12272,7 +12514,7 @@ async function publish(ctx, w) {
     throw new Stale;
   await screen(ctx, "\u23F3 \u041F\u0443\u0431\u043B\u0438\u043A\u0443\u044E\u2026");
   const f = compose(w);
-  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f, repoWarning: w.repoWarning ?? null });
+  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f, repoWarning: w.repoWarning ?? null, screenshots: w.shots ?? [] });
   const kb = new import_grammy6.InlineKeyboard().text("\uD83D\uDCE6 \u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B", "p:list:0").row().text("\u2302 \u041C\u0435\u043D\u044E", "m:home");
   if (result.kind === "published") {
     await screen(ctx, `\u2705 <b>${esc(f.name)}</b> ${esc(f.version)} \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u043D \u0432 @${config().channelUsername}.${result.queued ? `
@@ -12338,6 +12580,8 @@ async function handleCallback(ctx) {
       return pluginRoute(ctx, action, a1, a2);
     case "v":
       return versionRoute(ctx, action, num2(a1));
+    case "s":
+      return shotRoute(ctx, action, num2(a1), a2);
     case "a":
       if (!isAdmin(uid))
         throw new Stale;
@@ -12373,6 +12617,8 @@ ${hint}${current ? `
 \u0421\u0435\u0439\u0447\u0430\u0441:
 <code>${esc(current)}</code>` : ""}`, new import_grammy7.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", `p:open:${plugin2.rid}`));
     }
+    case "shots":
+      return showShots(ctx, num2(a1));
     case "repo":
       return showRepo(ctx, num2(a1));
     case "repoedit": {
@@ -12529,8 +12775,10 @@ ${esc(desc)}` : "",
   if (owner) {
     kb.text("\u041D\u043E\u0432\u0430\u044F \u0432\u0435\u0440\u0441\u0438\u044F", `p:newv:${rid}`).text("\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", `p:desc:${rid}`).row();
     kb.text("\u0418\u043A\u043E\u043D\u043A\u0430", `p:icon:${rid}`).text("\u0410\u0432\u0442\u043E\u0440", `p:auth:${rid}`).row();
-    kb.text("\uD83D\uDD17 \u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439", `p:repo:${rid}`).row();
+    kb.text("\uD83D\uDD17 \u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439", `p:repo:${rid}`).text("\uD83D\uDDBC \u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B", `p:shots:${rid}`).row();
   }
+  if (!owner)
+    kb.text("\uD83D\uDDBC \u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B", `p:shots:${rid}`).row();
   kb.text("\u0412\u0435\u0440\u0441\u0438\u0438", `p:vers:${rid}:0`).text("\u0423\u0434\u0430\u043B\u0438\u0442\u044C", `p:del:${rid}`).row();
   if (isAdmin(ctx.from.id))
     kb.text(plugin2.hidden ? "\uD83D\uDC41 \u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D" : "\uD83D\uDE48 \u0421\u043A\u0440\u044B\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D", `p:hide:${rid}`).row();
@@ -12538,6 +12786,87 @@ ${esc(desc)}` : "",
   await screen(ctx, lines.join(`
 `).replace(/\n{3,}/g, `
 
+`), kb);
+}
+async function shotRoute(ctx, action, rid, arg) {
+  const { plugin: plugin2, owner } = await accessible(ctx, rid);
+  const shotOf = async () => {
+    const shot = await getScreenshot(num2(arg));
+    if (!shot || shot.pluginId !== plugin2.id)
+      throw new Stale;
+    return shot;
+  };
+  switch (action) {
+    case "add": {
+      if (!owner)
+        throw new Stale;
+      const count = (await listScreenshots(plugin2.id)).length;
+      if (count >= MAX_SCREENSHOTS)
+        return `\u0423\u0436\u0435 ${MAX_SCREENSHOTS} \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u2014 \u044D\u0442\u043E \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C`;
+      await setSession(ctx.from.id, "shots", { rid });
+      return screen(ctx, `<b>${esc(plugin2.name)}</b>
+\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B \u043A\u0430\u043A \u0444\u043E\u0442\u043E (\u043D\u0435 \u0444\u0430\u0439\u043B\u043E\u043C): \u0434\u043E 10 \u041C\u0411, \u043C\u0435\u043D\u044C\u0448\u0430\u044F \u0441\u0442\u043E\u0440\u043E\u043D\u0430 \u043D\u0435 \u043C\u0435\u043D\u0435\u0435 320 px. \u041C\u043E\u0436\u043D\u043E \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u043F\u043E\u0434\u0440\u044F\u0434. \u0421\u0435\u0439\u0447\u0430\u0441 ${count}/${MAX_SCREENSHOTS}.`, new import_grammy7.InlineKeyboard().text("\u0413\u043E\u0442\u043E\u0432\u043E", `p:shots:${rid}`));
+    }
+    case "view": {
+      const list = await listScreenshots(plugin2.id);
+      if (!list.length)
+        return "\u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u043D\u0435\u0442";
+      if (list.length === 1)
+        await ctx.replyWithPhoto(list[0].fileId);
+      else
+        await ctx.replyWithMediaGroup(list.map((s) => ({ type: "photo", media: s.fileId })));
+      return;
+    }
+    case "left":
+    case "right": {
+      if (!owner)
+        throw new Stale;
+      const shot = await shotOf();
+      await moveScreenshot2(ctx.api, plugin2, shot.id, action === "left" ? -1 : 1);
+      return showShots(ctx, rid);
+    }
+    case "del": {
+      const shot = await shotOf();
+      return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u2116${shot.position + 1} \u043F\u043B\u0430\u0433\u0438\u043D\u0430 <b>${esc(plugin2.name)}</b>? \u0424\u043E\u0442\u043E \u0431\u0443\u0434\u0435\u0442 \u0443\u0434\u0430\u043B\u0435\u043D\u043E \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430.`, new import_grammy7.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `s:delok:${rid}:${shot.id}`).text("\u041D\u0435\u0442", `p:shots:${rid}`));
+    }
+    case "delok": {
+      const shot = await shotOf();
+      try {
+        await deleteScreenshot(ctx.api, shot);
+      } catch (e) {
+        if (e instanceof PublishError)
+          return e.message;
+        throw e;
+      }
+      return showShots(ctx, rid);
+    }
+  }
+  throw new Stale;
+}
+async function showShots(ctx, rid) {
+  const { plugin: plugin2, owner } = await accessible(ctx, rid);
+  const list = await listScreenshots(plugin2.id);
+  const lines = [
+    `<b>${esc(plugin2.name)}</b> \u2014 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B (${list.length}/${MAX_SCREENSHOTS})`,
+    list.length ? list.map((s, i) => `${i + 1}. ${s.msgId !== null ? "\u2705 \u0432 \u043A\u0430\u043D\u0430\u043B\u0435" : "\u23F3 \u0436\u0434\u0451\u0442 \u043E\u0434\u043E\u0431\u0440\u0435\u043D\u0438\u044F \u043F\u043B\u0430\u0433\u0438\u043D\u0430"}`).join(`
+`) : "\u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442."
+  ];
+  const kb = new import_grammy7.InlineKeyboard;
+  list.forEach((s, i) => {
+    kb.text(`#${i + 1}`, "x:noop");
+    if (owner && i > 0)
+      kb.text("\u25C0", `s:left:${rid}:${s.id}`);
+    if (owner && i < list.length - 1)
+      kb.text("\u25B6", `s:right:${rid}:${s.id}`);
+    kb.text("\uD83D\uDDD1", `s:del:${rid}:${s.id}`).row();
+  });
+  if (owner && list.length < MAX_SCREENSHOTS)
+    kb.text("\u2795 \u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C", `s:add:${rid}`);
+  if (list.length)
+    kb.text("\uD83D\uDC41 \u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C", `s:view:${rid}`);
+  kb.row();
+  nav(kb, `p:open:${rid}`);
+  await screen(ctx, lines.join(`
 `), kb);
 }
 async function showRepo(ctx, rid) {
@@ -12605,6 +12934,29 @@ async function showVersion(ctx, vrid) {
   nav(kb, `p:vers:${plugin2.rid}:0`);
   await screen(ctx, lines.filter(Boolean).join(`
 `), kb);
+}
+async function handlePhoto(ctx) {
+  const uid = ctx.from.id;
+  const s = await getSession(uid);
+  if (s?.state === "wiz")
+    return wizPhoto(ctx, s.payload);
+  if (s?.state === "shots") {
+    const { plugin: plugin2, owner } = await accessible(ctx, s.payload.rid);
+    if (!owner)
+      throw new Stale;
+    const check = checkPhoto(ctx.message.photo);
+    if (!check.ok)
+      return void await ctx.reply(`\u274C ${check.error}`);
+    const r = await addScreenshot2(ctx.api, plugin2, check);
+    if (r.kind === "error")
+      return void await ctx.reply(`\u26A0\uFE0F ${r.message}`);
+    await setSession(uid, "shots", s.payload);
+    await ctx.reply(`\u2705 \u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E (${r.count}/${MAX_SCREENSHOTS})${r.published ? "" : " \u2014 \u043F\u043E\u044F\u0432\u0438\u0442\u0441\u044F \u0432 \u043A\u0430\u043D\u0430\u043B\u0435 \u043F\u043E\u0441\u043B\u0435 \u043E\u0434\u043E\u0431\u0440\u0435\u043D\u0438\u044F \u043F\u043B\u0430\u0433\u0438\u043D\u0430"}.`, { reply_markup: new import_grammy7.InlineKeyboard().text("\u0413\u043E\u0442\u043E\u0432\u043E", `p:shots:${plugin2.rid}`) });
+    return;
+  }
+  await ctx.reply("\u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B \u0434\u043E\u0431\u0430\u0432\u043B\u044F\u044E\u0442\u0441\u044F \u0432 \u043C\u0430\u0441\u0442\u0435\u0440\u0435 \u043F\u0443\u0431\u043B\u0438\u043A\u0430\u0446\u0438\u0438 \u0438\u043B\u0438 \u0432 \u044D\u043A\u0440\u0430\u043D\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u2192 \xAB\u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B\xBB.", {
+    reply_markup: new import_grammy7.InlineKeyboard().text("\u2302 \u041C\u0435\u043D\u044E", "m:home")
+  });
 }
 async function handleText(ctx) {
   const uid = ctx.from.id;
@@ -12738,6 +13090,7 @@ function createBot() {
   bot.command("rebuild", adminOnly(async (ctx) => ctx.reply(await doRebuild(ctx) ?? "\u0413\u043E\u0442\u043E\u0432\u043E")));
   bot.command("backup", adminOnly((ctx) => doBackup(ctx)));
   bot.on("message:document", onDocument);
+  bot.on("message:photo", handlePhoto);
   bot.on("message:text", handleText);
   bot.on("callback_query:data", async (ctx) => {
     let alert;

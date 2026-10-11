@@ -39,6 +39,7 @@ Cron (`/api/cron/flush`, раз в сутки — лимит Hobby) выноси
 | `src/publish.ts` | публикация/откат, пересборка и закреп `catalog.json` под lease-локом |
 | `src/catalog.ts`, `src/plugin-header.ts`, `src/semver.ts`, `src/validate.ts` | чистая логика (покрыта тестами) |
 | `src/repo.ts`, `src/repo-change.ts` | ссылка на репозиторий: валидация, проверка доступности с защитой от SSRF, смена через модерацию |
+| `src/screenshots.ts` | скриншоты: проверка фото, публикация, перестановка, удаление |
 | `src/store.ts`, `src/db.ts`, `migrations/` | Postgres |
 
 Пересборка каталога сериализуется lease-локом в `meta` (advisory-локи не работают поверх HTTP-драйвера Neon).

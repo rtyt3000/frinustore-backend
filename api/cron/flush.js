@@ -5522,7 +5522,7 @@ function compareSemver(a, b) {
 
 // src/catalog.ts
 var MAX_CATALOG_BYTES = 1024 * 1024;
-function buildCatalog(plugins, versions, installs, now) {
+function buildCatalog(plugins, versions, installs, now, screenshots = new Map) {
   const out = [];
   for (const p of plugins) {
     if (p.hidden || !p.repo)
@@ -5537,6 +5537,7 @@ function buildCatalog(plugins, versions, installs, now) {
     });
     if (!vs.length)
       continue;
+    const shots = (screenshots.get(p.id) ?? []).slice(0, 8);
     out.push({
       id: p.id,
       name: p.name,
@@ -5544,6 +5545,7 @@ function buildCatalog(plugins, versions, installs, now) {
       description: p.description,
       icon: p.icon,
       repo: p.repo,
+      ...shots.length ? { screenshots: shots } : {},
       installs: installs.get(p.id) ?? 0,
       versions: vs
     });
@@ -10660,6 +10662,13 @@ var version = (r) => ({
 async function allPlugins() {
   return (await q("SELECT * FROM plugins ORDER BY rid")).map(plugin);
 }
+async function publishedScreenshots() {
+  const rows = await q("SELECT plugin_id, msg_id FROM screenshots WHERE msg_id IS NOT NULL ORDER BY plugin_id, position, id");
+  const out = new Map;
+  for (const r of rows)
+    out.set(r.plugin_id, [...out.get(r.plugin_id) ?? [], Number(r.msg_id)]);
+  return out;
+}
 async function allVersions() {
   return (await q("SELECT * FROM versions ORDER BY rid")).map(version);
 }
@@ -10732,7 +10741,7 @@ async function writeCatalogMessage(api, json) {
   await setMeta("catalog_msg_id", String(sent.message_id));
 }
 async function rebuildLocked(api, force) {
-  const [plugins, versions, installs] = await Promise.all([allPlugins(), allVersions(), installCounts()]);
+  const [plugins, versions, installs, shots] = await Promise.all([allPlugins(), allVersions(), installCounts(), publishedScreenshots()]);
   const catalog = buildCatalog(plugins.map((p2) => ({ id: p2.id, name: p2.name, author: p2.author, description: p2.description, icon: p2.icon, repo: p2.repoUrl, hidden: p2.hidden })), versions.map((v2) => ({
     pluginId: v2.pluginId,
     version: v2.version,
@@ -10741,7 +10750,7 @@ async function rebuildLocked(api, force) {
     changelog: v2.changelog,
     grants: v2.grants,
     status: v2.status
-  })), installs, now());
+  })), installs, now(), shots);
   const fingerprint = catalogFingerprint(catalog);
   if (!force && await getMeta("catalog_hash") === fingerprint && await getMeta("catalog_msg_id"))
     return false;

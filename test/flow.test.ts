@@ -15,6 +15,7 @@ import { setQueryRunner } from '../src/db.ts'
 import { publishVersion, refreshCatalog, removePlugin, unpublishVersion } from '../src/publish.ts'
 import * as store from '../src/store.ts'
 import { approve, reject, submit, type Fields } from '../src/submit.ts'
+import { addScreenshot, deleteScreenshot, moveScreenshot } from '../src/screenshots.ts'
 import { approveRepoChange, rejectRepoChange, requestRepoChange } from '../src/repo-change.ts'
 import type { Catalog } from '../src/catalog.ts'
 
@@ -45,6 +46,12 @@ function fakeApi() {
       catalog = read(media.media)
       return {}
     },
+    sendPhoto: async (...args: any[]) => {
+      calls.push({ m: 'sendPhoto', args })
+      if (fail.sendPhoto) throw fail.sendPhoto
+      return { message_id: nextId++ }
+    },
+    sendMediaGroup: async (...args: any[]) => void calls.push({ m: 'sendMediaGroup', args }),
     pinChatMessage: async (...args: any[]) => void calls.push({ m: 'pin', args }),
     deleteMessage: async (...args: any[]) => void calls.push({ m: 'deleteMessage', args }),
     sendMessage: async (...args: any[]) => {
@@ -82,7 +89,7 @@ beforeAll(async () => {
 })
 
 beforeEach(async () => {
-  await pg.exec('TRUNCATE users, plugins, versions, repo_changes, installs, meta, sessions, jobs RESTART IDENTITY CASCADE')
+  await pg.exec('TRUNCATE users, plugins, versions, repo_changes, screenshots, installs, meta, sessions, jobs RESTART IDENTITY CASCADE')
 })
 
 describe('publish flow', () => {
@@ -326,5 +333,128 @@ describe('repository changes', () => {
     const r = await requestRepoChange(t.api, { ...plugin, repoUrl: null }, 'https://github.com/o/first', 1, up)
     expect(r.kind).toBe('applied') // first link needs no review: there is nothing to protect
     expect(t.catalog().plugins[0]!.repo).toBe('https://github.com/o/first')
+  })
+})
+
+describe('screenshots flow', () => {
+  const withShots = (userId: number, f: Fields, n: number) => ({
+    ...input(userId, f),
+    screenshots: Array.from({ length: n }, (_, i) => ({ id: `photo-${i}`, u: `uniq-${i}` })),
+  })
+
+  test('staged photos stay out of the channel until approval, then go out in order as photos', async () => {
+    const t = fakeApi()
+    expect((await submit(t.api, withShots(1, fields(), 3))).kind).toBe('pending')
+    expect(t.calls.some((c) => c.m === 'sendPhoto' && c.args[0] === -1001)).toBe(false) // nothing published yet
+    // the moderator sees the album together with the card
+    const toMod = t.calls.filter((c) => c.args[0] === 900).map((c) => c.m)
+    expect(toMod.indexOf('sendMediaGroup')).toBeGreaterThanOrEqual(0)
+    expect(toMod.indexOf('sendMediaGroup')).toBeLessThan(toMod.indexOf('sendDocument'))
+
+    await approve(t.api, (await store.listPendingVersions(0, 1)).rows[0]!.rid, '@m')
+    const photos = t.calls.filter((c) => c.m === 'sendPhoto')
+    expect(photos.map((c) => c.args[1])).toEqual(['photo-0', 'photo-1', 'photo-2'])
+    expect(photos[0]!.args[2].caption).toBe('#screenshot u.plugin')
+    const shots = t.catalog().plugins[0]!.screenshots!
+    expect(shots.length).toBe(3)
+    expect(shots).toEqual((await store.listScreenshots('u.plugin')).map((s) => s.msgId!))
+  })
+
+  test('rejection drops the staged photos; nothing was ever in the channel', async () => {
+    const t = fakeApi()
+    await submit(t.api, withShots(1, fields(), 2))
+    await reject(t.api, (await store.listPendingVersions(0, 1)).rows[0]!.rid, 'нет', '@m')
+    expect(await store.listScreenshots('u.plugin')).toEqual([])
+    expect(t.calls.some((c) => c.m === 'sendPhoto')).toBe(false)
+  })
+
+  test('a failed publication takes already sent photos back', async () => {
+    const t = fakeApi()
+    await submit(t.api, withShots(1, fields(), 3))
+    const v = (await store.listPendingVersions(0, 1)).rows[0]!
+    let n = 0
+    const orig = (t.api as any).sendPhoto
+    ;(t.api as any).sendPhoto = async (...a: any[]) => {
+      if (++n === 3) throw new Error('boom')
+      return orig(...a)
+    }
+    await expect(publishVersion(t.api, v.rid, 'pending')).rejects.toThrow()
+    expect(t.calls.filter((c) => c.m === 'deleteMessage').length).toBeGreaterThanOrEqual(3) // doc + two photos
+    expect((await store.listScreenshots('u.plugin')).every((s) => s.msgId === null)).toBe(true)
+    expect(await store.getVersion(v.rid)).toMatchObject({ status: 'pending' })
+  })
+
+  test('without an approved version a new photo is staged, with one it is published at once', async () => {
+    const t = fakeApi()
+    await submit(t.api, input(1, fields()))
+    const plugin = (await store.getPlugin('u.plugin'))!
+    const staged = await addScreenshot(t.api, plugin, { fileId: 'a', uniqueId: 'ua' })
+    expect(staged).toMatchObject({ kind: 'added', published: false })
+    expect(t.calls.some((c) => c.m === 'sendPhoto')).toBe(false)
+
+    await approve(t.api, (await store.listPendingVersions(0, 1)).rows[0]!.rid, '@m')
+    expect(t.catalog().plugins[0]!.screenshots?.length).toBe(1)
+
+    const live = await addScreenshot(t.api, plugin, { fileId: 'b', uniqueId: 'ub' })
+    expect(live).toMatchObject({ kind: 'added', published: true, count: 2 })
+    expect(t.catalog().plugins[0]!.screenshots?.length).toBe(2)
+    expect(await addScreenshot(t.api, plugin, { fileId: 'b', uniqueId: 'ub' })).toMatchObject({ kind: 'error' })
+  })
+
+  test('limit of 8, and a failed upload leaves no row behind', async () => {
+    const t = fakeApi()
+    await submit(t.api, input(1, fields()))
+    await approve(t.api, (await store.listPendingVersions(0, 1)).rows[0]!.rid, '@m')
+    const plugin = (await store.getPlugin('u.plugin'))!
+    for (let i = 0; i < 8; i++) expect((await addScreenshot(t.api, plugin, { fileId: `f${i}`, uniqueId: `u${i}` })).kind).toBe('added')
+    expect(await addScreenshot(t.api, plugin, { fileId: 'extra', uniqueId: 'ux' })).toMatchObject({ kind: 'error', message: expect.stringContaining('максимум') })
+
+    const t2 = fakeApi()
+    await pg.exec('TRUNCATE screenshots')
+    t2.fail.sendPhoto = new Error('telegram down')
+    const bad = await addScreenshot(t2.api, plugin, { fileId: 'z', uniqueId: 'uz' })
+    expect(bad.kind).toBe('error')
+    expect(await store.listScreenshots('u.plugin')).toEqual([])
+  })
+
+  test('delete rewrites the catalog before removing the photo; move reorders the catalog', async () => {
+    const t = fakeApi()
+    await submit(t.api, withShots(1, fields(), 3))
+    await approve(t.api, (await store.listPendingVersions(0, 1)).rows[0]!.rid, '@m')
+    const plugin = (await store.getPlugin('u.plugin'))!
+    const [s0, s1, s2] = await store.listScreenshots('u.plugin')
+    const ids = [s0!.msgId!, s1!.msgId!, s2!.msgId!]
+    expect(t.catalog().plugins[0]!.screenshots).toEqual(ids)
+
+    await moveScreenshot(t.api, plugin, s2!.id, -1)
+    expect(t.catalog().plugins[0]!.screenshots).toEqual([ids[0], ids[2], ids[1]])
+    await moveScreenshot(t.api, plugin, s0!.id, -1) // already first: nothing changes
+    expect(t.catalog().plugins[0]!.screenshots).toEqual([ids[0], ids[2], ids[1]])
+
+    t.calls.length = 0
+    await deleteScreenshot(t.api, (await store.getScreenshot(s0!.id))!)
+    const order = t.calls.map((c) => c.m)
+    expect(order.indexOf('editMessageMedia')).toBeLessThan(order.indexOf('deleteMessage'))
+    expect(t.calls.find((c) => c.m === 'deleteMessage')!.args[1]).toBe(ids[0])
+    expect(t.catalog().plugins[0]!.screenshots).toEqual([ids[2], ids[1]])
+  })
+
+  test('removing a plugin deletes its photo messages too', async () => {
+    const t = fakeApi()
+    await submit(t.api, withShots(1, fields(), 2))
+    await approve(t.api, (await store.listPendingVersions(0, 1)).rows[0]!.rid, '@m')
+    const msgIds = (await store.listScreenshots('u.plugin')).map((s) => s.msgId)
+    t.calls.length = 0
+    await removePlugin(t.api, 'u.plugin')
+    const deleted = t.calls.filter((c) => c.m === 'deleteMessage').map((c) => c.args[1])
+    for (const id of msgIds) expect(deleted).toContain(id)
+  })
+
+  test('cancelling a pending first publication removes its staged photos', async () => {
+    const t = fakeApi()
+    await submit(t.api, withShots(1, fields(), 2))
+    const v = (await store.listPendingVersions(0, 1)).rows[0]!
+    await unpublishVersion(t.api, v.rid, 'delete')
+    expect(await store.listScreenshots('u.plugin')).toEqual([])
   })
 })

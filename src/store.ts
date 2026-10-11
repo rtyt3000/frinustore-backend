@@ -32,6 +32,18 @@ export interface RepoChange {
   createdAt: number
 }
 
+export interface Screenshot {
+  id: number
+  pluginId: string
+  position: number
+  /** null until published to the channel */
+  msgId: number | null
+  fileId: string
+  uniqueId: string
+}
+
+export const MAX_SCREENSHOTS = 8
+
 export interface ModMsg {
   chat: number
   msg: number
@@ -66,6 +78,15 @@ const plugin = (r: any): Plugin => ({
   repoWarning: r.repo_warning ?? null,
   hidden: r.hidden,
   createdAt: Number(r.created_at),
+})
+
+const screenshot = (r: any): Screenshot => ({
+  id: Number(r.id),
+  pluginId: r.plugin_id,
+  position: Number(r.position),
+  msgId: r.msg_id === null ? null : Number(r.msg_id),
+  fileId: r.file_id,
+  uniqueId: r.file_unique_id,
 })
 
 const repoChange = (r: any): RepoChange => ({
@@ -186,6 +207,134 @@ export async function listPlugins(opts: { owner?: number; offset: number; limit:
 
 export async function allPlugins(): Promise<Plugin[]> {
   return (await q('SELECT * FROM plugins ORDER BY rid')).map(plugin)
+}
+
+// ---- screenshots
+
+export async function listScreenshots(pluginId: string): Promise<Screenshot[]> {
+  return (await q('SELECT * FROM screenshots WHERE plugin_id = $1 ORDER BY position, id', [pluginId])).map(screenshot)
+}
+
+export async function getScreenshot(id: number): Promise<Screenshot | null> {
+  const r = await one('SELECT * FROM screenshots WHERE id = $1', [id])
+  return r && screenshot(r)
+}
+
+/** published screenshots per plugin, in display order (what catalog.json lists) */
+export async function publishedScreenshots(): Promise<Map<string, number[]>> {
+  const rows = await q<any>('SELECT plugin_id, msg_id FROM screenshots WHERE msg_id IS NOT NULL ORDER BY plugin_id, position, id')
+  const out = new Map<string, number[]>()
+  for (const r of rows) out.set(r.plugin_id, [...(out.get(r.plugin_id) ?? []), Number(r.msg_id)])
+  return out
+}
+
+export type AddScreenshot = { ok: true; shot: Screenshot } | { ok: false; reason: 'full' | 'duplicate' }
+
+/** appends one photo; the limit and the duplicate check are enforced by the statement itself */
+export async function addScreenshot(pluginId: string, fileId: string, uniqueId: string): Promise<AddScreenshot> {
+  const r = await one(
+    `INSERT INTO screenshots (plugin_id, position, file_id, file_unique_id, created_at)
+     SELECT $1, COALESCE((SELECT max(position) + 1 FROM screenshots WHERE plugin_id = $1), 0), $2, $3, $4
+     WHERE (SELECT count(*) FROM screenshots WHERE plugin_id = $1) < $5
+     ON CONFLICT (plugin_id, file_unique_id) DO NOTHING RETURNING *`,
+    [pluginId, fileId, uniqueId, now(), MAX_SCREENSHOTS],
+  )
+  if (r) return { ok: true, shot: screenshot(r) }
+  const dup = await one('SELECT 1 FROM screenshots WHERE plugin_id = $1 AND file_unique_id = $2', [pluginId, uniqueId])
+  return { ok: false, reason: dup ? 'duplicate' : 'full' }
+}
+
+export async function setScreenshotMsg(id: number, msgId: number | null): Promise<void> {
+  await q('UPDATE screenshots SET msg_id = $2 WHERE id = $1', [id, msgId])
+}
+
+async function normalizeScreenshots(pluginId: string): Promise<void> {
+  await q(
+    `UPDATE screenshots s SET position = r.n FROM
+       (SELECT id, row_number() OVER (ORDER BY position, id) - 1 AS n FROM screenshots WHERE plugin_id = $1) r
+     WHERE s.id = r.id AND s.position <> r.n`,
+    [pluginId],
+  )
+}
+
+export async function removeScreenshot(id: number): Promise<Screenshot | null> {
+  const r = await one('DELETE FROM screenshots WHERE id = $1 RETURNING *', [id])
+  if (!r) return null
+  const shot = screenshot(r)
+  await normalizeScreenshots(shot.pluginId)
+  return shot
+}
+
+/** puts a removed screenshot back at its old position (used when the catalog could not be updated) */
+export async function restoreScreenshot(shot: Screenshot): Promise<void> {
+  await q('UPDATE screenshots SET position = position + 1 WHERE plugin_id = $1 AND position >= $2', [shot.pluginId, shot.position])
+  await q(
+    `INSERT INTO screenshots (plugin_id, position, msg_id, file_id, file_unique_id, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (plugin_id, file_unique_id) DO NOTHING`,
+    [shot.pluginId, shot.position, shot.msgId, shot.fileId, shot.uniqueId, now()],
+  )
+}
+
+/** swaps a screenshot with its neighbour; false when it is already at the edge */
+export async function moveScreenshot(pluginId: string, id: number, dir: -1 | 1): Promise<boolean> {
+  await normalizeScreenshots(pluginId)
+  const list = await listScreenshots(pluginId)
+  const i = list.findIndex((s) => s.id === id)
+  const j = i + dir
+  if (i < 0 || j < 0 || j >= list.length) return false
+  await q('UPDATE screenshots SET position = CASE id WHEN $1 THEN $3::int WHEN $2 THEN $4::int END WHERE id IN ($1, $2)', [
+    list[i]!.id,
+    list[j]!.id,
+    list[j]!.position,
+    list[i]!.position,
+  ])
+  return true
+}
+
+/** photos of a plugin that never got approved are dropped together with the request */
+export async function dropPendingScreenshots(pluginId: string): Promise<void> {
+  await q(
+    `DELETE FROM screenshots WHERE plugin_id = $1 AND msg_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM versions WHERE plugin_id = $1 AND status IN ('pending', 'publishing', 'approved', 'hidden'))`,
+    [pluginId],
+  )
+}
+
+// ---- wizard session helpers (photos of an album arrive as concurrent updates)
+
+export interface WizShot {
+  id: string
+  u: string
+}
+
+export type WizAdd = { ok: true; shots: WizShot[]; payload: any } | { ok: false; reason: 'full' | 'duplicate' | 'gone' }
+
+/** atomic append to the session's photo list, so parallel album updates do not overwrite each other */
+export async function appendWizardShot(userId: number, shot: WizShot): Promise<WizAdd> {
+  const r = await one<any>(
+    `UPDATE sessions SET payload_json = jsonb_set(payload_json, '{shots}', COALESCE(payload_json->'shots', '[]'::jsonb) || $2::jsonb), updated_at = $4
+     WHERE user_id = $1 AND state = 'wiz'
+       AND jsonb_array_length(COALESCE(payload_json->'shots', '[]'::jsonb)) < $3
+       AND NOT (COALESCE(payload_json->'shots', '[]'::jsonb) @> jsonb_build_array(jsonb_build_object('u', $5::text)))
+     RETURNING payload_json`,
+    [userId, JSON.stringify([shot]), MAX_SCREENSHOTS, now(), shot.u],
+  )
+  if (r) return { ok: true, shots: r.payload_json.shots, payload: r.payload_json }
+  const s = await one<any>("SELECT payload_json FROM sessions WHERE user_id = $1 AND state = 'wiz'", [userId])
+  if (!s) return { ok: false, reason: 'gone' }
+  const shots: WizShot[] = s.payload_json.shots ?? []
+  return { ok: false, reason: shots.some((x) => x.u === shot.u) ? 'duplicate' : 'full' }
+}
+
+/** saves the wizard but keeps the photo list the database already has */
+export async function saveWizard(userId: number, payload: unknown): Promise<void> {
+  await q(
+    `INSERT INTO sessions (user_id, state, payload_json, updated_at) VALUES ($1, 'wiz', $2::jsonb, $3)
+     ON CONFLICT (user_id) DO UPDATE SET state = 'wiz', updated_at = EXCLUDED.updated_at,
+       payload_json = EXCLUDED.payload_json || jsonb_build_object('shots',
+         CASE WHEN sessions.state = 'wiz' THEN COALESCE(sessions.payload_json->'shots', '[]'::jsonb) ELSE '[]'::jsonb END)`,
+    [userId, JSON.stringify(payload), now()],
+  )
 }
 
 // ---- repository changes
@@ -466,7 +615,7 @@ export async function cleanup(): Promise<void> {
 
 export async function dumpAll(): Promise<Record<string, unknown[]>> {
   const out: Record<string, unknown[]> = {}
-  for (const t of ['users', 'plugins', 'versions', 'repo_changes', 'installs', 'meta', 'sessions']) {
+  for (const t of ['users', 'plugins', 'versions', 'repo_changes', 'screenshots', 'installs', 'meta', 'sessions']) {
     out[t] = await q(`SELECT * FROM ${t}`)
   }
   return out

@@ -164,3 +164,76 @@ describe('store on postgres', () => {
     expect(await store.installCount('a.b.c')).toBe(0)
   })
 })
+
+describe('screenshots in postgres', () => {
+  const P = 'shots.plugin'
+  beforeAll(async () => {
+    await store.createPlugin({ id: P, owner: 5, name: 'S', author: 'a', description: '', icon: 'inu://bot', repoUrl: 'https://github.com/o/r', repoWarning: null })
+  })
+
+  test('append keeps order, rejects duplicates and the 9th photo', async () => {
+    for (let i = 0; i < 8; i++) expect((await store.addScreenshot(P, `f${i}`, `u${i}`)).ok).toBe(true)
+    expect(await store.addScreenshot(P, 'x', 'u3')).toEqual({ ok: false, reason: 'duplicate' })
+    expect(await store.addScreenshot(P, 'x', 'u99')).toEqual({ ok: false, reason: 'full' })
+    expect((await store.listScreenshots(P)).map((s) => s.fileId)).toEqual(['f0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7'])
+  })
+
+  test('only published photos are listed for the catalog, in order', async () => {
+    const list = await store.listScreenshots(P)
+    await store.setScreenshotMsg(list[2]!.id, 30)
+    await store.setScreenshotMsg(list[0]!.id, 10)
+    expect((await store.publishedScreenshots()).get(P)).toEqual([10, 30])
+  })
+
+  test('move swaps neighbours and stops at the edges', async () => {
+    const before = (await store.listScreenshots(P)).map((s) => s.id)
+    expect(await store.moveScreenshot(P, before[0]!, -1)).toBe(false)
+    expect(await store.moveScreenshot(P, before[7]!, 1)).toBe(false)
+    expect(await store.moveScreenshot(P, before[2]!, -1)).toBe(true)
+    const after = (await store.listScreenshots(P)).map((s) => s.id)
+    expect(after).toEqual([before[0], before[2], before[1], ...before.slice(3)])
+    expect((await store.publishedScreenshots()).get(P)).toEqual([10, 30]) // photo 2 (30) moved before photo 1, order of published stays 10, 30
+  })
+
+  test('remove renumbers, restore puts the photo back where it was', async () => {
+    const list = await store.listScreenshots(P)
+    const removed = (await store.removeScreenshot(list[1]!.id))!
+    expect((await store.listScreenshots(P)).map((s) => s.position)).toEqual([0, 1, 2, 3, 4, 5, 6])
+    await store.restoreScreenshot(removed)
+    expect((await store.listScreenshots(P)).map((s) => s.fileId)).toEqual(list.map((s) => s.fileId))
+    expect(await store.removeScreenshot(999999)).toBeNull()
+  })
+
+  test('staged photos are dropped only when the plugin has no live version', async () => {
+    const staged = () => store.listScreenshots(P).then((l) => l.filter((x) => x.msgId === null).length)
+    await newVersion(P, '1.0.0', 900)
+    await store.dropPendingScreenshots(P)
+    expect(await staged()).toBe(6) // a pending version is still waiting: keep the photos
+    await store.deleteVersion((await store.listVersions(P)).rows[0]!.rid)
+    await store.dropPendingScreenshots(P)
+    expect(await staged()).toBe(0) // nothing left to publish them with
+    expect((await store.listScreenshots(P)).length).toBe(2) // published ones are not touched here
+  })
+
+  test('wizard photos: parallel appends all land, limit and duplicates hold', async () => {
+    await store.setSession(77, 'wiz', { steps: [], i: 0 })
+    const results = await Promise.all(Array.from({ length: 10 }, (_, i) => store.appendWizardShot(77, { id: `f${i}`, u: `u${i}` })))
+    expect(results.filter((r) => r.ok).length).toBe(8)
+    expect(results.filter((r) => !r.ok).every((r) => !r.ok && r.reason === 'full')).toBe(true)
+    const s = (await store.getSession(77))!
+    expect(s.payload.shots.length).toBe(8)
+    expect(new Set(s.payload.shots.map((x: any) => x.u)).size).toBe(8)
+    expect(await store.appendWizardShot(77, { id: 'f0', u: 'u0' })).toMatchObject({ ok: false })
+    expect(await store.appendWizardShot(78, { id: 'f0', u: 'u0' })).toEqual({ ok: false, reason: 'gone' })
+  })
+
+  test('saving the wizard never loses photos added meanwhile', async () => {
+    await store.saveWizard(77, { steps: ['icon'], i: 3, stale: true })
+    const s = (await store.getSession(77))!
+    expect(s.payload).toMatchObject({ i: 3, stale: true })
+    expect(s.payload.shots.length).toBe(8)
+    await store.setSession(79, 'edit', { field: 'x' })
+    await store.saveWizard(79, { i: 0 }) // a leftover session of another kind does not leak its fields
+    expect((await store.getSession(79))!.payload.shots).toEqual([])
+  })
+})

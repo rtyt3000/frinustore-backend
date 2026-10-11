@@ -36,7 +36,7 @@ async function writeCatalogMessage(api: Api, json: string): Promise<void> {
 
 /** rebuilds catalog.json from the DB and edits the pinned message; the caller must hold the lock */
 async function rebuildLocked(api: Api, force: boolean): Promise<boolean> {
-  const [plugins, versions, installs] = await Promise.all([store.allPlugins(), store.allVersions(), store.installCounts()])
+  const [plugins, versions, installs, shots] = await Promise.all([store.allPlugins(), store.allVersions(), store.installCounts(), store.publishedScreenshots()])
   const catalog = buildCatalog(
     plugins.map((p) => ({ id: p.id, name: p.name, author: p.author, description: p.description, icon: p.icon, repo: p.repoUrl, hidden: p.hidden })),
     versions.map((v) => ({
@@ -50,6 +50,7 @@ async function rebuildLocked(api: Api, force: boolean): Promise<boolean> {
     })),
     installs,
     now(),
+    shots,
   )
   const fingerprint = catalogFingerprint(catalog)
   if (!force && (await store.getMeta('catalog_hash')) === fingerprint && (await store.getMeta('catalog_msg_id'))) return false
@@ -101,6 +102,41 @@ const caption = (name: string, version: string, id: string) => `#plugin ${name} 
 
 export class PublishError extends Error {}
 
+const shotCaption = (pluginId: string) => `#screenshot ${pluginId}`
+
+/** sends one staged photo to the channel as a photo message and records its message id */
+export async function publishOneScreenshot(api: Api, pluginId: string, shot: store.Screenshot): Promise<number> {
+  const sent = await api.sendPhoto(config().channelId, shot.fileId, { caption: shotCaption(pluginId), disable_notification: true })
+  await store.setScreenshotMsg(shot.id, sent.message_id)
+  shot.msgId = sent.message_id
+  return sent.message_id
+}
+
+/** takes photos back out of the channel but keeps the rows (staged again) */
+export async function discardScreenshots(api: Api, shots: store.Screenshot[]): Promise<void> {
+  for (const s of shots) {
+    if (s.msgId !== null) await deleteChannelMessage(api, s.msgId).catch(() => {})
+    await store.setScreenshotMsg(s.id, null).catch(() => {})
+    s.msgId = null
+  }
+}
+
+/** publishes every staged photo of a plugin, in order; all or nothing */
+export async function sendPendingScreenshots(api: Api, pluginId: string): Promise<store.Screenshot[]> {
+  const sent: store.Screenshot[] = []
+  try {
+    for (const s of await store.listScreenshots(pluginId)) {
+      if (s.msgId !== null) continue
+      await publishOneScreenshot(api, pluginId, s)
+      sent.push(s)
+    }
+    return sent
+  } catch (e) {
+    await discardScreenshots(api, sent)
+    throw e
+  }
+}
+
 /**
  * Sends the stored file to the channel and rewrites the catalog. Atomic: on any failure the
  * uploaded file is deleted and the version goes back to `from`.
@@ -115,21 +151,25 @@ export async function publishVersion(api: Api, rid: number, from: 'pending' | 'h
   }
   const chat = config().channelId
   let msgId: number | undefined
+  let shots: store.Screenshot[] = []
   try {
     const sent = await api.sendDocument(chat, v.fileId, { caption: caption(p.name, v.version, p.id), disable_notification: true })
     msgId = sent.message_id
     await store.setVersionStatus(rid, 'approved', { msgId, date: now() })
+    // photos staged while the plugin waited for approval go out with its first version
+    shots = await sendPendingScreenshots(api, p.id)
     const r = await refreshCatalog(api)
     return { queued: r === 'queued' }
   } catch (e) {
     log('error', 'publish failed', { rid, error: errText(e) })
     if (msgId !== undefined) await api.deleteMessage(chat, msgId).catch(() => {})
+    await discardScreenshots(api, shots)
     await store.setVersionStatus(rid, from, { msgId: null }).catch(() => {})
     throw new PublishError(`Не удалось опубликовать: ${errText(e)}`)
   }
 }
 
-async function deleteChannelMessage(api: Api, msgId: number | null): Promise<void> {
+export async function deleteChannelMessage(api: Api, msgId: number | null): Promise<void> {
   if (msgId === null) return
   try {
     await api.deleteMessage(config().channelId, msgId)
@@ -147,8 +187,10 @@ export async function unpublishVersion(api: Api, rid: number, mode: 'hide' | 'de
   if (!v) return
   if (v.status !== 'approved') {
     // never reached the channel: nothing to take down
-    if (mode === 'delete') await store.deleteVersion(rid)
-    else await store.setVersionStatus(rid, 'hidden')
+    if (mode === 'delete') {
+      await store.deleteVersion(rid)
+      await store.dropPendingScreenshots(v.pluginId) // a cancelled first publication takes its staged photos with it
+    } else await store.setVersionStatus(rid, 'hidden')
     return
   }
   await store.setVersionStatus(rid, 'hidden')
@@ -166,6 +208,7 @@ export async function removePlugin(api: Api, pluginId: string): Promise<void> {
   const p = await store.getPlugin(pluginId)
   if (!p) return
   const { rows } = await store.listVersions(pluginId)
+  const shots = await store.listScreenshots(pluginId)
   await store.updatePlugin(pluginId, { hidden: true })
   const r = await refreshCatalog(api, { waitMs: 20000 })
   if (r === 'queued') {
@@ -173,6 +216,7 @@ export async function removePlugin(api: Api, pluginId: string): Promise<void> {
     throw new PublishError('Каталог сейчас обновляется, попробуйте через минуту')
   }
   for (const v of rows) await deleteChannelMessage(api, v.msgId)
+  for (const s of shots) await deleteChannelMessage(api, s.msgId)
   await store.deletePlugin(pluginId)
 }
 

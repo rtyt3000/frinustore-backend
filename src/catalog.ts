@@ -18,6 +18,8 @@ export interface CatalogPlugin {
   icon?: string
   /** https link to the source repository; plugins without one are not listed */
   repo: string
+  /** msgIds of photo messages in the channel, in display order; omitted when empty */
+  screenshots?: number[]
   installs: number
   versions: CatalogVersion[]
 }
@@ -56,6 +58,7 @@ export function buildCatalog(
   versions: VersionRow[],
   installs: Map<string, number>,
   now: number,
+  screenshots: Map<string, number[]> = new Map(),
 ): Catalog {
   const out: CatalogPlugin[] = []
   for (const p of plugins) {
@@ -70,6 +73,7 @@ export function buildCatalog(
         return cv
       })
     if (!vs.length) continue
+    const shots = (screenshots.get(p.id) ?? []).slice(0, 8)
     out.push({
       id: p.id,
       name: p.name,
@@ -77,6 +81,7 @@ export function buildCatalog(
       description: p.description,
       icon: p.icon,
       repo: p.repo,
+      ...(shots.length ? { screenshots: shots } : {}),
       installs: installs.get(p.id) ?? 0,
       versions: vs,
     })

@@ -3,6 +3,7 @@ import { InlineKeyboard, type Context } from 'grammy'
 import { config } from './config.ts'
 import { analyzeGrants, decodeText, MAX_FILE_BYTES, parseHeader, type PluginHeader } from './plugin-header.ts'
 import { checkRepo, normalizeRepo, repoWarningText } from './repo.ts'
+import { checkPhoto } from './screenshots.ts'
 import { compareSemver, maxSemver } from './semver.ts'
 import * as store from './store.ts'
 import { checkTarget, needsModeration, submit, type Fields } from './submit.ts'
@@ -17,7 +18,7 @@ import {
   validateVersion,
 } from './validate.ts'
 
-type Step = 'id' | 'name' | 'version' | 'description' | 'repo' | 'icon' | 'changelog'
+type Step = 'id' | 'name' | 'version' | 'description' | 'repo' | 'icon' | 'screenshots' | 'changelog'
 
 interface Wiz {
   file: { id: string; sha: string; size: number; name: string }
@@ -30,11 +31,13 @@ interface Wiz {
   repoAck?: string
   /** non-blocking note from the reachability check */
   repoWarning?: string | null
+  /** photos collected at the screenshots step (the database copy is the truth, see appendWizardShot) */
+  shots?: store.WizShot[]
   /** raw text of every field; validated again on use */
   f: Partial<Record<Step | 'author', string>>
 }
 
-const NEW_STEPS: Step[] = ['id', 'name', 'version', 'description', 'repo', 'icon', 'changelog']
+const NEW_STEPS: Step[] = ['id', 'name', 'version', 'description', 'repo', 'icon', 'screenshots', 'changelog']
 const EXISTING_STEPS: Step[] = ['id', 'version', 'changelog']
 /** plugins created before the repository became mandatory must set it with their next version */
 const LEGACY_STEPS: Step[] = ['id', 'repo', 'version', 'changelog']
@@ -49,6 +52,7 @@ const LABEL: Record<Step, string> = {
   description: 'Описание',
   repo: 'Репозиторий',
   icon: 'Иконка',
+  screenshots: 'Скриншоты',
   changelog: 'Changelog',
 }
 
@@ -59,11 +63,12 @@ const HINT: Record<Step, string> = {
   description: 'До 500 символов. Можно по языкам: строки «ru: …» и «en: …». Пустое описание допустимо.',
   repo: 'Ссылка на публичный репозиторий с исходниками: https://github.com/автор/репозиторий (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea). Обязательно.',
   icon: 'inu://имя, tg://emoji?id=… или tg://addstickers?set=…',
+  screenshots: 'Пришлите от 1 до 8 скриншотов как фото (не файлом): до 10 МБ, меньшая сторона не менее 320 px. Шаг необязательный; позже их можно изменить в экране плагина.',
   changelog: 'До 300 символов, необязательно.',
 }
 
 /** field may be empty */
-const OPTIONAL: Step[] = ['description', 'changelog']
+const OPTIONAL: Step[] = ['description', 'screenshots', 'changelog']
 
 // ---- entry points
 
@@ -96,6 +101,10 @@ export async function onDocument(ctx: Context): Promise<void> {
 
   const reject = (msg: string) => ctx.reply(`❌ ${msg}`, { reply_markup: nav(new InlineKeyboard()) })
 
+  if (doc.mime_type?.startsWith('image/')) {
+    const inShots = session?.state === 'shots' || (session?.state === 'wiz' && session.payload.steps[session.payload.i] === 'screenshots')
+    if (inShots) return void (await reject('Скриншоты нужно присылать как фото (со сжатием), а не файлом'))
+  }
   if (!/\.inu\.js$/i.test(doc.file_name ?? '')) return void (await reject('Нужен файл с расширением .inu.js'))
   if ((doc.file_size ?? 0) > MAX_FILE_BYTES) return void (await reject('Файл больше 5 МБ'))
 
@@ -166,12 +175,13 @@ async function adoptExisting(w: Wiz, p: store.Plugin): Promise<void> {
 // ---- steps
 
 async function save(ctx: Context, w: Wiz): Promise<void> {
-  await store.setSession(ctx.from!.id, 'wiz', w)
+  await store.saveWizard(ctx.from!.id, w)
 }
 
 async function renderStep(ctx: Context, w: Wiz, notice?: string): Promise<void> {
   const step = w.steps[w.i]
   if (!step) return renderCard(ctx, w)
+  if (step === 'screenshots') return renderShots(ctx, w, notice)
   const value = w.f[step]
   const optional = OPTIONAL.includes(step)
   const prompt = !value && !optional ? true : w.awaiting
@@ -197,6 +207,35 @@ async function renderStep(ctx: Context, w: Wiz, notice?: string): Promise<void> 
   kb.row().text('Отмена', 'w:cancel')
   await save(ctx, w)
   await screen(ctx, text, kb)
+}
+
+async function renderShots(ctx: Context, w: Wiz, notice?: string): Promise<void> {
+  const n = w.shots?.length ?? 0
+  const text = `${notice ? `⚠️ ${esc(notice)}\n\n` : ''}<b>Шаг ${w.i + 1}/${w.steps.length}: ${LABEL.screenshots}</b>\n${HINT.screenshots}\n\nДобавлено: ${n}/${store.MAX_SCREENSHOTS}`
+  const kb = new InlineKeyboard()
+  if (n) kb.text('Готово', 'w:shotsdone')
+  else kb.text('Пропустить', 'w:skip')
+  kb.row().text('Отмена', 'w:cancel')
+  w.awaiting = false
+  await save(ctx, w)
+  await screen(ctx, text, kb)
+}
+
+/** a photo while the wizard is on the screenshots step */
+export async function wizPhoto(ctx: Context, w: Wiz): Promise<void> {
+  if (w.steps[w.i] !== 'screenshots') {
+    await ctx.reply('Сейчас фото не нужны. Следуйте шагам мастера или нажмите «Отмена».')
+    return
+  }
+  const check = checkPhoto(ctx.message!.photo)
+  if (!check.ok) return void (await ctx.reply(`❌ ${check.error}`))
+  const r = await store.appendWizardShot(ctx.from!.id, { id: check.fileId, u: check.uniqueId })
+  if (!r.ok) {
+    const why = { full: `Уже ${store.MAX_SCREENSHOTS} скриншотов — это максимум`, duplicate: 'Этот скриншот уже добавлен', gone: 'Мастер закрыт, начните заново' }[r.reason]
+    return void (await ctx.reply(`⚠️ ${why}`))
+  }
+  w.shots = r.shots
+  await renderStep(ctx, w)
 }
 
 /** validates and stores one field; may switch the wizard to "new version of my plugin" mode */
@@ -254,6 +293,8 @@ async function applyStep(ctx: Context, w: Wiz, step: Step, raw: string): Promise
       w.f.repo = v.value
       return null
     }
+    case 'screenshots':
+      return null // photos arrive through wizPhoto and the buttons, never as text
     case 'icon': {
       const v = validateIcon(raw)
       if (!v.ok) return v.error
@@ -298,6 +339,10 @@ export async function wizAction(ctx: Context, action: string): Promise<string | 
       w.awaiting = false
       return renderStep(ctx, w)
     }
+    case 'shotsdone':
+      if (step !== 'screenshots') throw new Stale()
+      w.i++
+      return renderStep(ctx, w)
     case 'go':
       return publish(ctx, w)
     default:
@@ -371,6 +416,7 @@ async function renderCard(ctx: Context, w: Wiz): Promise<void> {
     `id: <code>${esc(f.id)}</code>`,
     `автор: ${esc(f.author)}`,
     `репозиторий: ${esc(f.repo)}`,
+    w.shots?.length ? `скриншоты: ${w.shots.length}` : '',
     `иконка: <code>${esc(f.icon)}</code>`,
     w.f.description ? `описание: ${esc(w.f.description)}` : '',
     f.changelog ? `changelog: ${esc(f.changelog)}` : '',
@@ -393,7 +439,7 @@ async function publish(ctx: Context, w: Wiz): Promise<string | void> {
   if (!(await store.clearSession(uid))) throw new Stale()
   await screen(ctx, '⏳ Публикую…')
   const f = compose(w)
-  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f, repoWarning: w.repoWarning ?? null })
+  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f, repoWarning: w.repoWarning ?? null, screenshots: w.shots ?? [] })
   const kb = new InlineKeyboard().text('📦 Мои плагины', 'p:list:0').row().text('⌂ Меню', 'm:home')
   if (result.kind === 'published') {
     await screen(

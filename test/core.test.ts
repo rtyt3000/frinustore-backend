@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { buildCatalog, catalogFingerprint, serializeCatalog, type PluginRow, type VersionRow } from '../src/catalog.ts'
 import { canManage } from '../src/perms.ts'
+import { checkPhoto } from '../src/screenshots.ts'
 import { analyzeGrants, decodeText, newUnsafe, parseHeader } from '../src/plugin-header.ts'
 import { compareSemver, maxSemver, parseSemver } from '../src/semver.ts'
 import { pageCount, clampPage } from '../src/ui.ts'
@@ -191,5 +192,31 @@ describe('permissions', () => {
     expect(canManage(1, 1, false)).toEqual({ allowed: true, owner: true })
     expect(canManage(2, 1, false)).toEqual({ allowed: false, owner: false })
     expect(canManage(2, 1, true)).toEqual({ allowed: true, owner: false })
+  })
+})
+
+describe('screenshots in the catalog', () => {
+  test('listed in order after repo, capped at 8, omitted when empty', () => {
+    const shots = new Map([['a', [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]]])
+    const c = buildCatalog([plugin('a'), plugin('b')], [ver('a', '1.0.0'), ver('b', '1.0.0')], new Map(), 1, shots)
+    const a = c.plugins.find((p) => p.id === 'a')!
+    const b = c.plugins.find((p) => p.id === 'b')!
+    expect(a.screenshots).toEqual([5, 6, 7, 8, 9, 10, 11, 12])
+    expect(Object.keys(a)).toEqual(['id', 'name', 'author', 'description', 'icon', 'repo', 'screenshots', 'installs', 'versions'])
+    expect('screenshots' in b).toBe(false)
+    expect(buildCatalog([plugin('b')], [ver('b', '1.0.0')], new Map(), 1, new Map([['b', []]])).plugins[0]).not.toHaveProperty('screenshots')
+  })
+})
+
+describe('checkPhoto', () => {
+  const size = (width: number, height: number, file_size?: number) => ({ file_id: `f${width}`, file_unique_id: `u${width}`, width, height, file_size })
+  test('takes the largest size and enforces the limits', () => {
+    expect(checkPhoto([size(90, 90), size(1280, 720, 200_000), size(320, 180)])).toEqual({ ok: true, fileId: 'f1280', uniqueId: 'u1280' })
+    expect(checkPhoto(undefined).ok).toBe(false)
+    expect(checkPhoto([]).ok).toBe(false)
+    expect(checkPhoto([size(1280, 300)]).ok).toBe(false) // short side below 320
+    expect(checkPhoto([size(320, 320)]).ok).toBe(true)
+    expect(checkPhoto([size(2000, 2000, 10 * 1024 * 1024 + 1)]).ok).toBe(false)
+    expect(checkPhoto([size(2000, 2000, 10 * 1024 * 1024)]).ok).toBe(true)
   })
 })
