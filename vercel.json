@@ -1,6 +1,7 @@
 {
   "bunVersion": "1.x",
   "buildCommand": "bun run migrate",
+  "outputDirectory": "public",
   "functions": {
     "api/webhook.ts": { "maxDuration": 60 },
     "api/cron/flush.ts": { "maxDuration": 60 }
