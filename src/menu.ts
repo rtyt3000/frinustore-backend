@@ -3,12 +3,14 @@ import { config, isAdmin } from './config.ts'
 import { handleAdmin, onAdminText } from './admin.ts'
 import { canManage } from './perms.ts'
 import { requestRepoChange } from './repo-change.ts'
+import { log } from './log.ts'
 import { analyzeGrants } from './plugin-header.ts'
+import { buildPreview } from './preview.ts'
 import { addScreenshot, checkPhoto, deleteScreenshot, moveScreenshot } from './screenshots.ts'
 import { PublishError, publishVersion, refreshAfterEdit, removePlugin, unpublishVersion, errText } from './publish.ts'
 import * as store from './store.ts'
 import { STATUS_ICON, STATUS_NAME, esc, grantsBlock, when } from './text.ts'
-import { PAGE_SIZE, Stale, clampPage, nav, pagerRow, screen, showHome } from './ui.ts'
+import { PAGE_SIZE, Stale, btn, clampPage, label, nav, pagerRow, screen, showHome } from './ui.ts'
 import { cancelWizard, startPublish, wizAction, wizPhoto, wizText } from './wizard.ts'
 import { descriptionToText, pickDescription, validateAuthor, validateDescription, validateIcon } from './validate.ts'
 
@@ -106,6 +108,8 @@ async function pluginRoute(ctx: Context, action: string, a1?: string, a2?: strin
     }
     case 'shots':
       return showShots(ctx, num(a1))
+    case 'preview':
+      return sendPreview(ctx, num(a1))
     case 'repo':
       return showRepo(ctx, num(a1))
     case 'repoedit': {
@@ -134,7 +138,7 @@ async function pluginRoute(ctx: Context, action: string, a1?: string, a2?: strin
       return screen(
         ctx,
         `Удалить плагин <b>${esc(plugin.name)}</b>?\nВсе версии пропадут из канала и каталога, счётчик установок обнулится.`,
-        new InlineKeyboard().text('Да, удалить', `p:delok:${plugin.rid}`).text('Нет', `p:open:${plugin.rid}`),
+        new InlineKeyboard().add(btn('Да, удалить', `p:delok:${plugin.rid}`, 'danger')).text('Нет', `p:open:${plugin.rid}`),
       )
     }
     case 'delok': {
@@ -187,7 +191,7 @@ async function versionRoute(ctx: Context, action: string, vrid: number): Promise
       return screen(
         ctx,
         `Удалить версию <b>${esc(plugin.name)} ${esc(v.version)}</b>? Файл будет удалён из канала.`,
-        new InlineKeyboard().text('Да, удалить', `v:delok:${vrid}`).text('Нет', `v:open:${vrid}`),
+        new InlineKeyboard().add(btn('Да, удалить', `v:delok:${vrid}`, 'danger')).text('Нет', `v:open:${vrid}`),
       )
     case 'delok': {
       try {
@@ -215,10 +219,16 @@ async function showHelp(ctx: Context): Promise<void> {
     '<pre>// ==InuPlugin==\n// @name    My plugin\n// @id      me.myplugin\n// @version 1.0.0\n// @grant   fetch(example.com)\n// ==/InuPlugin==</pre>',
     '',
     '<b>Правила</b>',
-    '• Версия должна быть строго больше предыдущей (semver).',
-    '• id занят первым автором; чужой id публиковать нельзя.',
-    '• Держите <code>@id</code> в файле неизменным — по нему приложение решает, обновить плагин или поставить новый.',
-    '• Гранты показывает само приложение при установке; в каталоге они только справочные.',
+    '<blockquote expandable>' +
+      [
+        '• Версия должна быть строго больше предыдущей (semver).',
+        '• id занят первым автором; чужой id публиковать нельзя.',
+        '• У каждого плагина должна быть ссылка на публичный репозиторий.',
+        '• Скриншоты — до 8 фото, меньшая сторона от 320 px.',
+        '• Держите <code>@id</code> в файле неизменным — по нему приложение решает, обновить плагин или поставить новый.',
+        '• Гранты показывает само приложение при установке; в каталоге они только справочные.',
+      ].join('\n') +
+      '</blockquote>',
   ].join('\n')
   await screen(ctx, text, nav(new InlineKeyboard().url('📣 Открыть канал', `https://t.me/${config().channelUsername}`).row()))
 }
@@ -231,7 +241,7 @@ export async function showMyPlugins(ctx: Context, page: number): Promise<void> {
   const kb = new InlineKeyboard()
   for (const pl of rows) kb.text(`${pl.hidden ? '🙈 ' : ''}${pl.name}`, `p:open:${pl.rid}`).row()
   pagerRow(kb, 'p:list', p, total)
-  kb.text('📤 Опубликовать плагин', 'w:pub').row()
+  kb.add(btn('📤 Опубликовать плагин', 'w:pub', 'primary')).row()
   nav(kb)
   await screen(ctx, total ? `<b>Мои плагины</b> (${total})` : '<b>Мои плагины</b>\nПока пусто — опубликуйте первый.', kb)
 }
@@ -246,7 +256,7 @@ export async function showPlugin(ctx: Context, rid: number): Promise<void> {
     `автор: ${esc(plugin.author)}${owner ? '' : ` (<code>${plugin.owner}</code>)`}`,
     `установки: ${installs}`,
     plugin.repoUrl ? `репозиторий: ${esc(plugin.repoUrl)}` : '⚠️ репозиторий не указан — плагина нет в каталоге',
-    desc ? `\n${esc(desc)}` : '',
+    desc ? `\n<blockquote expandable>${esc(desc)}</blockquote>` : '',
     '',
     total ? '<b>Версии</b>' : 'Версий пока нет.',
     ...rows.map((v) => `${STATUS_ICON[v.status] ?? '•'} <code>${esc(v.version)}</code> · ${STATUS_NAME[v.status] ?? v.status} · ${when(v.date)}`),
@@ -257,6 +267,7 @@ export async function showPlugin(ctx: Context, rid: number): Promise<void> {
     kb.text('Новая версия', `p:newv:${rid}`).text('Описание', `p:desc:${rid}`).row()
     kb.text('Иконка', `p:icon:${rid}`).text('Автор', `p:auth:${rid}`).row()
     kb.text('🔗 Репозиторий', `p:repo:${rid}`).text('🖼 Скриншоты', `p:shots:${rid}`).row()
+    kb.text('👁 Предпросмотр', `p:preview:${rid}`).row()
   }
   if (!owner) kb.text('🖼 Скриншоты', `p:shots:${rid}`).row()
   kb.text('Версии', `p:vers:${rid}:0`).text('Удалить', `p:del:${rid}`).row()
@@ -303,7 +314,7 @@ async function shotRoute(ctx: Context, action: string, rid: number, arg?: string
       return screen(
         ctx,
         `Удалить скриншот №${shot.position + 1} плагина <b>${esc(plugin.name)}</b>? Фото будет удалено из канала.`,
-        new InlineKeyboard().text('Да, удалить', `s:delok:${rid}:${shot.id}`).text('Нет', `p:shots:${rid}`),
+        new InlineKeyboard().add(btn('Да, удалить', `s:delok:${rid}:${shot.id}`, 'danger')).text('Нет', `p:shots:${rid}`),
       )
     }
     case 'delok': {
@@ -329,16 +340,30 @@ async function showShots(ctx: Context, rid: number): Promise<void> {
   ]
   const kb = new InlineKeyboard()
   list.forEach((s, i) => {
-    kb.text(`#${i + 1}`, 'x:noop')
+    kb.add(label(`#${i + 1}`))
     if (owner && i > 0) kb.text('◀', `s:left:${rid}:${s.id}`)
     if (owner && i < list.length - 1) kb.text('▶', `s:right:${rid}:${s.id}`)
-    kb.text('🗑', `s:del:${rid}:${s.id}`).row()
+    kb.add(btn('🗑', `s:del:${rid}:${s.id}`, 'danger')).row()
   })
   if (owner && list.length < store.MAX_SCREENSHOTS) kb.text('➕ Добавить', `s:add:${rid}`)
   if (list.length) kb.text('👁 Показать', `s:view:${rid}`)
   kb.row()
   nav(kb, `p:open:${rid}`)
   await screen(ctx, lines.join('\n'), kb)
+}
+
+/** the plugin as a rich message; falls back to a plain summary where rich messages are unavailable */
+async function sendPreview(ctx: Context, rid: number): Promise<string | void> {
+  const { plugin } = await accessible(ctx, rid)
+  const [{ rows }, shots, installs] = await Promise.all([store.listVersions(plugin.id), store.listScreenshots(plugin.id), store.installCount(plugin.id)])
+  const rich = buildPreview({ plugin, installs, versions: rows, screenshots: shots, channelUsername: config().channelUsername })
+  try {
+    await ctx.api.sendRichMessage(ctx.chat!.id, rich)
+  } catch (e) {
+    log('warn', 'rich preview failed', { error: errText(e) })
+    if (shots.length) await ctx.replyWithMediaGroup(shots.map((s) => ({ type: 'photo' as const, media: s.fileId }))).catch(() => {})
+    return 'Предпросмотр недоступен в этом клиенте'
+  }
 }
 
 async function showRepo(ctx: Context, rid: number): Promise<void> {

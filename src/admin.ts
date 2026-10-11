@@ -6,7 +6,7 @@ import * as store from './store.ts'
 import { approveRepoChange, rejectRepoChange, repoChangeCard, repoChangeKeyboard } from './repo-change.ts'
 import { approve, modCard, modKeyboard, reject } from './submit.ts'
 import { esc } from './text.ts'
-import { PAGE_SIZE, Stale, clampPage, nav, pagerRow, screen } from './ui.ts'
+import { PAGE_SIZE, Stale, btn, clampPage, nav, pagerRow, screen } from './ui.ts'
 
 const num = (s: string | undefined): number => {
   const n = Number(s)
@@ -160,8 +160,8 @@ async function showCard(ctx: Context, rid: number): Promise<void> {
   if (v.status === 'pending') {
     const risk = analyzeGrants(v.grants)
     const reasons = [risk.unknown ? 'гранты неизвестны' : '', risk.unsafe.length ? 'unsafe-гранты' : ''].filter(Boolean)
-    for (const b of modKeyboard(rid).inline_keyboard[0]!) kb.text(b.text, (b as { callback_data: string }).callback_data)
-    kb.row()
+    kb.add(...modKeyboard(rid).inline_keyboard[0]!).row()
+    kb.text('👁 Предпросмотр', `p:preview:${p.rid}`).row()
     nav(kb, 'a:q:0')
     return screen(ctx, modCard(v, p, reasons), kb)
   }
@@ -185,7 +185,7 @@ async function showRepoCard(ctx: Context, id: number): Promise<void> {
   const plugin = c && (await store.getPlugin(c.pluginId))
   if (!c || !plugin) throw new Stale()
   const kb = new InlineKeyboard()
-  if (c.status === 'pending') for (const b of repoChangeKeyboard(id).inline_keyboard[0]!) kb.text(b.text, (b as { callback_data: string }).callback_data)
+  if (c.status === 'pending') kb.add(...repoChangeKeyboard(id).inline_keyboard[0]!)
   kb.row()
   nav(kb, 'a:rq:0')
   await screen(ctx, c.status === 'pending' ? repoChangeCard(c, plugin) : `${repoChangeCard(c, plugin)}\n\nСтатус: ${c.status}`, kb)
@@ -218,7 +218,7 @@ export async function askBan(ctx: Context, userId: number): Promise<void> {
   await screen(
     ctx,
     `Заблокировать пользователя <code>${userId}</code>? Он не сможет публиковать плагины.`,
-    new InlineKeyboard().text('Да, забанить', `a:banok:${userId}`).text('Нет', 'a:bans:0'),
+    new InlineKeyboard().add(btn('Да, забанить', `a:banok:${userId}`, 'danger')).text('Нет', 'a:bans:0'),
   )
 }
 

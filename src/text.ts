@@ -12,8 +12,9 @@ export function grantsBlock(grants: string[] | null, risk: GrantRisk): string {
   return `🔐 Гранты:\n${lines.join('\n')}`
 }
 
+/** HTML date shown in the reader's own locale and time zone (Bot API 9.5 `date_time`); the ISO date is the fallback */
 export function when(ts: number): string {
-  return new Date(ts * 1000).toISOString().slice(0, 10)
+  return `<tg-time unix="${ts}" format="d">${new Date(ts * 1000).toISOString().slice(0, 10)}</tg-time>`
 }
 
 export const STATUS_ICON: Record<string, string> = {

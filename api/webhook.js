@@ -11230,7 +11230,7 @@ async function refreshAfterEdit(api) {
 }
 
 // src/repo-change.ts
-var import_grammy2 = __toESM(require_mod(), 1);
+var import_grammy3 = __toESM(require_mod(), 1);
 
 // src/repo.ts
 import { lookup } from "dns/promises";
@@ -11363,7 +11363,7 @@ ${lines.join(`
 `)}`;
 }
 function when(ts2) {
-  return new Date(ts2 * 1000).toISOString().slice(0, 10);
+  return `<tg-time unix="${ts2}" format="d">${new Date(ts2 * 1000).toISOString().slice(0, 10)}</tg-time>`;
 }
 var STATUS_ICON = {
   approved: "\u2705",
@@ -11379,6 +11379,70 @@ var STATUS_NAME = {
   hidden: "\u0441\u043A\u0440\u044B\u0442\u0430",
   publishing: "\u043F\u0443\u0431\u043B\u0438\u043A\u0443\u0435\u0442\u0441\u044F"
 };
+
+// src/ui.ts
+var import_grammy2 = __toESM(require_mod(), 1);
+var PAGE_SIZE = 8;
+var btn = (text, data, style) => ({
+  text,
+  callback_data: data,
+  ...style ? { style } : {}
+});
+var label = (text) => ({ text, disabled: {} });
+
+class Stale extends Error {
+  constructor(message = "\u0423\u0441\u0442\u0430\u0440\u0435\u043B\u043E, \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043C\u0435\u043D\u044E \u0437\u0430\u043D\u043E\u0432\u043E") {
+    super(message);
+  }
+}
+var pageCount = (total) => Math.max(1, Math.ceil(total / PAGE_SIZE));
+var clampPage = (page, total) => Math.min(Math.max(0, Number.isFinite(page) ? page : 0), pageCount(total) - 1);
+function pagerRow(kb, prefix, page, total) {
+  const pages = pageCount(total);
+  if (pages <= 1)
+    return kb;
+  if (page > 0)
+    kb.text("\u2039", `${prefix}:${page - 1}`);
+  kb.add(label(`${page + 1}/${pages}`));
+  if (page < pages - 1)
+    kb.text("\u203A", `${prefix}:${page + 1}`);
+  return kb.row();
+}
+function nav(kb, back) {
+  if (back)
+    kb.text("\u2039 \u041D\u0430\u0437\u0430\u0434", back);
+  return kb.text("\u2302 \u041C\u0435\u043D\u044E", "m:home").row();
+}
+function homeKeyboard(userId) {
+  const kb = new import_grammy2.InlineKeyboard().add(btn("\uD83D\uDCE4 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D", "w:pub", "primary")).row().text("\uD83D\uDCE6 \u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B", "p:list:0").row().text("\u2139\uFE0F \u041F\u043E\u043C\u043E\u0449\u044C", "m:help").row();
+  if (isAdmin(userId))
+    kb.text("\uD83D\uDEE1 \u041C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u044F", "a:home").row();
+  return kb;
+}
+var OPTS = { parse_mode: "HTML", link_preview_options: { is_disabled: true } };
+var notModified2 = (e) => /message is not modified/i.test(errText(e));
+async function screen(ctx, text, kb) {
+  const msg = ctx.callbackQuery?.message;
+  if (msg) {
+    try {
+      if ("document" in msg && msg.document) {
+        await ctx.editMessageCaption({ caption: text.slice(0, 1024), reply_markup: kb, parse_mode: "HTML" });
+      } else {
+        await ctx.editMessageText(text, { ...OPTS, reply_markup: kb });
+      }
+      return;
+    } catch (e) {
+      if (notModified2(e))
+        return;
+    }
+  }
+  await ctx.reply(text, { ...OPTS, reply_markup: kb });
+}
+async function showHome(ctx) {
+  const uid = ctx.from.id;
+  await screen(ctx, `<b>\u041C\u0430\u0440\u043A\u0435\u0442 \u043F\u043B\u0430\u0433\u0438\u043D\u043E\u0432 Inugram</b>
+\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:`, homeKeyboard(uid));
+}
 
 // src/repo-change.ts
 async function requestRepoChange(api, plugin2, raw, submitter, opts = {}) {
@@ -11419,7 +11483,7 @@ function repoChangeCard(c, plugin2) {
   ].filter(Boolean).join(`
 `);
 }
-var repoChangeKeyboard = (id) => new import_grammy2.InlineKeyboard().text("\u2705 \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u044C", `a:rok:${id}`).text("\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C", `a:rno:${id}`);
+var repoChangeKeyboard = (id) => new import_grammy3.InlineKeyboard().add(btn("\u2705 \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u044C", `a:rok:${id}`, "success"), btn("\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C", `a:rno:${id}`, "danger"));
 async function notifyModerators(api, c, plugin2) {
   const cfg = config();
   const sent = [];
@@ -11476,7 +11540,7 @@ async function rejectRepoChange(api, id, reason, modName) {
 }
 
 // src/submit.ts
-var import_grammy3 = __toESM(require_mod(), 1);
+var import_grammy4 = __toESM(require_mod(), 1);
 async function checkTarget(userId, id, ver) {
   const existing = await getPlugin(id);
   if (existing && existing.owner !== userId)
@@ -11602,7 +11666,7 @@ function modCard(v2, p2, reasons) {
 `);
 }
 function modKeyboard(rid) {
-  return new import_grammy3.InlineKeyboard().text("\u2705 \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u044C", `a:ok:${rid}`).text("\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C", `a:no:${rid}`);
+  return new import_grammy4.InlineKeyboard().add(btn("\u2705 \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u044C", `a:ok:${rid}`, "success"), btn("\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C", `a:no:${rid}`, "danger"));
 }
 async function notifyModerators2(api, v2, reasons) {
   const p2 = await getPlugin(v2.pluginId);
@@ -11674,64 +11738,6 @@ async function reject(api, rid, reason, modName) {
   await api.sendMessage(v2.submitter, `\u274C \u0412\u0435\u0440\u0441\u0438\u044F ${v2.pluginId} ${v2.version} \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0430.
 \u041F\u0440\u0438\u0447\u0438\u043D\u0430: ${reason}`).catch(() => {});
   return { ok: true, message: "\u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E" };
-}
-
-// src/ui.ts
-var import_grammy4 = __toESM(require_mod(), 1);
-var PAGE_SIZE = 8;
-
-class Stale extends Error {
-  constructor(message = "\u0423\u0441\u0442\u0430\u0440\u0435\u043B\u043E, \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043C\u0435\u043D\u044E \u0437\u0430\u043D\u043E\u0432\u043E") {
-    super(message);
-  }
-}
-var pageCount = (total) => Math.max(1, Math.ceil(total / PAGE_SIZE));
-var clampPage = (page, total) => Math.min(Math.max(0, Number.isFinite(page) ? page : 0), pageCount(total) - 1);
-function pagerRow(kb, prefix, page, total) {
-  const pages = pageCount(total);
-  if (pages <= 1)
-    return kb;
-  if (page > 0)
-    kb.text("\u2039", `${prefix}:${page - 1}`);
-  kb.text(`${page + 1}/${pages}`, "x:noop");
-  if (page < pages - 1)
-    kb.text("\u203A", `${prefix}:${page + 1}`);
-  return kb.row();
-}
-function nav(kb, back) {
-  if (back)
-    kb.text("\u2039 \u041D\u0430\u0437\u0430\u0434", back);
-  return kb.text("\u2302 \u041C\u0435\u043D\u044E", "m:home").row();
-}
-function homeKeyboard(userId) {
-  const kb = new import_grammy4.InlineKeyboard().text("\uD83D\uDCE4 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D", "w:pub").row().text("\uD83D\uDCE6 \u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B", "p:list:0").row().text("\u2139\uFE0F \u041F\u043E\u043C\u043E\u0449\u044C", "m:help").row();
-  if (isAdmin(userId))
-    kb.text("\uD83D\uDEE1 \u041C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u044F", "a:home").row();
-  return kb;
-}
-var OPTS = { parse_mode: "HTML", link_preview_options: { is_disabled: true } };
-var notModified2 = (e) => /message is not modified/i.test(errText(e));
-async function screen(ctx, text, kb) {
-  const msg = ctx.callbackQuery?.message;
-  if (msg) {
-    try {
-      if ("document" in msg && msg.document) {
-        await ctx.editMessageCaption({ caption: text.slice(0, 1024), reply_markup: kb, parse_mode: "HTML" });
-      } else {
-        await ctx.editMessageText(text, { ...OPTS, reply_markup: kb });
-      }
-      return;
-    } catch (e) {
-      if (notModified2(e))
-        return;
-    }
-  }
-  await ctx.reply(text, { ...OPTS, reply_markup: kb });
-}
-async function showHome(ctx) {
-  const uid = ctx.from.id;
-  await screen(ctx, `<b>\u041C\u0430\u0440\u043A\u0435\u0442 \u043F\u043B\u0430\u0433\u0438\u043D\u043E\u0432 Inugram</b>
-\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435:`, homeKeyboard(uid));
 }
 
 // src/admin.ts
@@ -11883,9 +11889,8 @@ async function showCard(ctx, rid) {
   if (v2.status === "pending") {
     const risk = analyzeGrants(v2.grants);
     const reasons = [risk.unknown ? "\u0433\u0440\u0430\u043D\u0442\u044B \u043D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B" : "", risk.unsafe.length ? "unsafe-\u0433\u0440\u0430\u043D\u0442\u044B" : ""].filter(Boolean);
-    for (const b2 of modKeyboard(rid).inline_keyboard[0])
-      kb.text(b2.text, b2.callback_data);
-    kb.row();
+    kb.add(...modKeyboard(rid).inline_keyboard[0]).row();
+    kb.text("\uD83D\uDC41 \u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440", `p:preview:${p2.rid}`).row();
     nav(kb, "a:q:0");
     return screen(ctx, modCard(v2, p2, reasons), kb);
   }
@@ -11913,8 +11918,7 @@ async function showRepoCard(ctx, id) {
     throw new Stale;
   const kb = new import_grammy5.InlineKeyboard;
   if (c.status === "pending")
-    for (const b2 of repoChangeKeyboard(id).inline_keyboard[0])
-      kb.text(b2.text, b2.callback_data);
+    kb.add(...repoChangeKeyboard(id).inline_keyboard[0]);
   kb.row();
   nav(kb, "a:rq:0");
   await screen(ctx, c.status === "pending" ? repoChangeCard(c, plugin2) : `${repoChangeCard(c, plugin2)}
@@ -11945,7 +11949,7 @@ async function showBans(ctx, page) {
   await screen(ctx, `<b>\u0411\u0430\u043D\u044B</b> (${total})`, kb);
 }
 async function askBan(ctx, userId) {
-  await screen(ctx, `\u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F <code>${userId}</code>? \u041E\u043D \u043D\u0435 \u0441\u043C\u043E\u0436\u0435\u0442 \u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D\u044B.`, new import_grammy5.InlineKeyboard().text("\u0414\u0430, \u0437\u0430\u0431\u0430\u043D\u0438\u0442\u044C", `a:banok:${userId}`).text("\u041D\u0435\u0442", "a:bans:0"));
+  await screen(ctx, `\u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F <code>${userId}</code>? \u041E\u043D \u043D\u0435 \u0441\u043C\u043E\u0436\u0435\u0442 \u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D\u044B.`, new import_grammy5.InlineKeyboard().add(btn("\u0414\u0430, \u0437\u0430\u0431\u0430\u043D\u0438\u0442\u044C", `a:banok:${userId}`, "danger")).text("\u041D\u0435\u0442", "a:bans:0"));
 }
 async function showService(ctx) {
   const kb = new import_grammy5.InlineKeyboard().text("\uD83D\uDD04 \u041F\u0435\u0440\u0435\u0441\u043E\u0431\u0440\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433", "a:rebuild").row().text("\uD83D\uDCBE \u0411\u044D\u043A\u0430\u043F", "a:backup").row().text("\uD83D\uDCE1 \u0421\u0442\u0430\u0442\u0443\u0441 webhook", "a:hook").row();
@@ -11985,59 +11989,6 @@ function canManage(userId, ownerId, admin) {
   const owner = userId === ownerId;
   return { allowed: owner || admin, owner };
 }
-
-// src/screenshots.ts
-var MAX_PHOTO_BYTES = 10 * 1024 * 1024;
-var MIN_SIDE = 320;
-function checkPhoto(sizes) {
-  if (!sizes?.length)
-    return { ok: false, error: "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u043A\u0430\u043A \u0444\u043E\u0442\u043E (\u043D\u0435 \u0444\u0430\u0439\u043B\u043E\u043C \u0438 \u043D\u0435 \u0441\u0442\u0438\u043A\u0435\u0440\u043E\u043C)" };
-  const best = sizes.reduce((a2, b2) => b2.width * b2.height > a2.width * a2.height ? b2 : a2);
-  if (best.file_size !== undefined && best.file_size > MAX_PHOTO_BYTES)
-    return { ok: false, error: "\u0424\u043E\u0442\u043E \u0431\u043E\u043B\u044C\u0448\u0435 10 \u041C\u0411" };
-  if (Math.min(best.width, best.height) < MIN_SIDE)
-    return { ok: false, error: `\u041C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u0430\u044F \u0441\u0442\u043E\u0440\u043E\u043D\u0430 \u0444\u043E\u0442\u043E \u2014 ${MIN_SIDE} px (\u0443 \u044D\u0442\u043E\u0433\u043E ${Math.min(best.width, best.height)})` };
-  return { ok: true, fileId: best.file_id, uniqueId: best.file_unique_id };
-}
-async function addScreenshot2(api, plugin2, photo) {
-  const added = await addScreenshot(plugin2.id, photo.fileId, photo.uniqueId);
-  if (!added.ok) {
-    return { kind: "error", message: added.reason === "full" ? `\u0423\u0436\u0435 ${MAX_SCREENSHOTS} \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u2014 \u044D\u0442\u043E \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C` : "\u042D\u0442\u043E\u0442 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u0443\u0436\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D" };
-  }
-  const live = await hasApproved(plugin2.id);
-  if (live) {
-    try {
-      await publishOneScreenshot(api, plugin2.id, added.shot);
-      await refreshCatalog(api);
-    } catch (e) {
-      await discardScreenshots(api, [added.shot]);
-      await removeScreenshot(added.shot.id);
-      return { kind: "error", message: `\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442: ${e instanceof Error ? e.message : e}` };
-    }
-  }
-  return { kind: "added", count: (await listScreenshots(plugin2.id)).length, published: live };
-}
-async function deleteScreenshot(api, shot) {
-  const removed = await removeScreenshot(shot.id);
-  if (!removed)
-    return;
-  if (removed.msgId !== null) {
-    const r = await refreshCatalog(api, { waitMs: 20000 });
-    if (r === "queued") {
-      await restoreScreenshot(removed);
-      throw new PublishError("\u041A\u0430\u0442\u0430\u043B\u043E\u0433 \u0441\u0435\u0439\u0447\u0430\u0441 \u043E\u0431\u043D\u043E\u0432\u043B\u044F\u0435\u0442\u0441\u044F, \u043F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043C\u0438\u043D\u0443\u0442\u0443");
-    }
-    await deleteChannelMessage(api, removed.msgId);
-  }
-}
-async function moveScreenshot2(api, plugin2, id, dir) {
-  if (await moveScreenshot(plugin2.id, id, dir))
-    await refreshCatalog(api);
-}
-
-// src/wizard.ts
-var import_grammy6 = __toESM(require_mod(), 1);
-import { createHash } from "crypto";
 
 // src/validate.ts
 var ok = (value) => ({ ok: true, value });
@@ -12118,7 +12069,121 @@ function pickDescription(d) {
   return d.ru ?? d.en ?? Object.values(d)[0] ?? "";
 }
 
+// src/preview.ts
+function buildPreview(opts) {
+  const { plugin: plugin2, installs, versions, screenshots } = opts;
+  const blocks = [{ type: "heading", size: 1, text: plugin2.name }];
+  blocks.push({ type: "paragraph", text: `${plugin2.author} \xB7 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043E\u043A: ${installs}` });
+  const description = pickDescription(plugin2.description);
+  if (description)
+    blocks.push({ type: "paragraph", text: description });
+  if (screenshots.length) {
+    blocks.push({
+      type: "slideshow",
+      blocks: screenshots.map((s) => ({ type: "photo", photo: { type: "photo", media: s.fileId } })),
+      caption: { text: "\u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B" }
+    });
+  }
+  const shown = versions.filter((v2) => v2.status !== "rejected").slice(0, 10);
+  if (shown.length) {
+    blocks.push({
+      type: "details",
+      summary: `\u0412\u0435\u0440\u0441\u0438\u0438 (${shown.length})`,
+      is_open: true,
+      blocks: [
+        {
+          type: "list",
+          items: shown.map((v2) => ({
+            blocks: [
+              {
+                type: "paragraph",
+                text: `${v2.version} ${STATUS_ICON[v2.status] ?? ""} ${STATUS_NAME[v2.status] ?? v2.status}${v2.changelog ? ` \u2014 ${v2.changelog}` : ""}`
+              }
+            ]
+          }))
+        }
+      ]
+    });
+  }
+  const latest = shown[0];
+  if (latest?.grants) {
+    const risk = analyzeGrants(latest.grants);
+    blocks.push({
+      type: "details",
+      summary: `\u0413\u0440\u0430\u043D\u0442\u044B \u0432\u0435\u0440\u0441\u0438\u0438 ${latest.version}`,
+      ...risk.unsafe.length ? { is_open: true } : {},
+      blocks: latest.grants.length ? [
+        {
+          type: "list",
+          items: latest.grants.map((g) => ({
+            blocks: [{ type: "paragraph", text: `${g.startsWith("unsafe.") ? "\uD83D\uDEA8 " : risk.risky.includes(g) ? "\u26A0\uFE0F " : ""}${g}` }]
+          }))
+        }
+      ] : [{ type: "paragraph", text: "\u041F\u043B\u0430\u0433\u0438\u043D \u043D\u0435 \u0437\u0430\u043F\u0440\u0430\u0448\u0438\u0432\u0430\u0435\u0442 \u0433\u0440\u0430\u043D\u0442\u043E\u0432." }]
+    });
+  } else if (latest) {
+    blocks.push({ type: "paragraph", text: "\u0413\u0440\u0430\u043D\u0442\u044B \u043D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B: \u0437\u0430\u0433\u043E\u043B\u043E\u0432\u043E\u043A \u0444\u0430\u0439\u043B\u0430 \u043D\u0435 \u0440\u0430\u0437\u043E\u0431\u0440\u0430\u043D." });
+  }
+  const buttons = [];
+  if (plugin2.repoUrl)
+    buttons.push({ text: "\u0418\u0441\u0445\u043E\u0434\u043D\u044B\u0439 \u043A\u043E\u0434", style: "success", url: plugin2.repoUrl });
+  buttons.push({ text: "\u041A\u0430\u043D\u0430\u043B", url: `https://t.me/${opts.channelUsername}` });
+  blocks.push({ type: "buttons", buttons, align: "left" });
+  return { blocks };
+}
+
+// src/screenshots.ts
+var MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+var MIN_SIDE = 320;
+function checkPhoto(sizes) {
+  if (!sizes?.length)
+    return { ok: false, error: "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u043A\u0430\u043A \u0444\u043E\u0442\u043E (\u043D\u0435 \u0444\u0430\u0439\u043B\u043E\u043C \u0438 \u043D\u0435 \u0441\u0442\u0438\u043A\u0435\u0440\u043E\u043C)" };
+  const best = sizes.reduce((a2, b2) => b2.width * b2.height > a2.width * a2.height ? b2 : a2);
+  if (best.file_size !== undefined && best.file_size > MAX_PHOTO_BYTES)
+    return { ok: false, error: "\u0424\u043E\u0442\u043E \u0431\u043E\u043B\u044C\u0448\u0435 10 \u041C\u0411" };
+  if (Math.min(best.width, best.height) < MIN_SIDE)
+    return { ok: false, error: `\u041C\u0438\u043D\u0438\u043C\u0430\u043B\u044C\u043D\u0430\u044F \u0441\u0442\u043E\u0440\u043E\u043D\u0430 \u0444\u043E\u0442\u043E \u2014 ${MIN_SIDE} px (\u0443 \u044D\u0442\u043E\u0433\u043E ${Math.min(best.width, best.height)})` };
+  return { ok: true, fileId: best.file_id, uniqueId: best.file_unique_id };
+}
+async function addScreenshot2(api, plugin2, photo) {
+  const added = await addScreenshot(plugin2.id, photo.fileId, photo.uniqueId);
+  if (!added.ok) {
+    return { kind: "error", message: added.reason === "full" ? `\u0423\u0436\u0435 ${MAX_SCREENSHOTS} \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u2014 \u044D\u0442\u043E \u043C\u0430\u043A\u0441\u0438\u043C\u0443\u043C` : "\u042D\u0442\u043E\u0442 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u0443\u0436\u0435 \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D" };
+  }
+  const live = await hasApproved(plugin2.id);
+  if (live) {
+    try {
+      await publishOneScreenshot(api, plugin2.id, added.shot);
+      await refreshCatalog(api);
+    } catch (e) {
+      await discardScreenshots(api, [added.shot]);
+      await removeScreenshot(added.shot.id);
+      return { kind: "error", message: `\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442: ${e instanceof Error ? e.message : e}` };
+    }
+  }
+  return { kind: "added", count: (await listScreenshots(plugin2.id)).length, published: live };
+}
+async function deleteScreenshot(api, shot) {
+  const removed = await removeScreenshot(shot.id);
+  if (!removed)
+    return;
+  if (removed.msgId !== null) {
+    const r = await refreshCatalog(api, { waitMs: 20000 });
+    if (r === "queued") {
+      await restoreScreenshot(removed);
+      throw new PublishError("\u041A\u0430\u0442\u0430\u043B\u043E\u0433 \u0441\u0435\u0439\u0447\u0430\u0441 \u043E\u0431\u043D\u043E\u0432\u043B\u044F\u0435\u0442\u0441\u044F, \u043F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0447\u0435\u0440\u0435\u0437 \u043C\u0438\u043D\u0443\u0442\u0443");
+    }
+    await deleteChannelMessage(api, removed.msgId);
+  }
+}
+async function moveScreenshot2(api, plugin2, id, dir) {
+  if (await moveScreenshot(plugin2.id, id, dir))
+    await refreshCatalog(api);
+}
+
 // src/wizard.ts
+var import_grammy6 = __toESM(require_mod(), 1);
+import { createHash } from "crypto";
 var NEW_STEPS = ["id", "name", "version", "description", "repo", "icon", "screenshots", "changelog"];
 var EXISTING_STEPS = ["id", "version", "changelog"];
 var LEGACY_STEPS = ["id", "repo", "version", "changelog"];
@@ -12177,6 +12242,7 @@ async function onDocument(ctx) {
     return void await reject2("\u041D\u0443\u0436\u0435\u043D \u0444\u0430\u0439\u043B \u0441 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u0435\u043C .inu.js");
   if ((doc.file_size ?? 0) > MAX_FILE_BYTES)
     return void await reject2("\u0424\u0430\u0439\u043B \u0431\u043E\u043B\u044C\u0448\u0435 5 \u041C\u0411");
+  await ctx.replyWithChatAction("upload_document").catch(() => {});
   let buf;
   try {
     const f = await ctx.api.getFile(doc.file_id);
@@ -12506,7 +12572,7 @@ async function renderCard(ctx, w) {
   w.awaiting = false;
   await save(ctx, w);
   await screen(ctx, lines.filter(Boolean).join(`
-`), new import_grammy6.InlineKeyboard().text("\u2705 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C", "w:go").text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel"));
+`), new import_grammy6.InlineKeyboard().add(btn("\u2705 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C", "w:go", "success")).text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel"));
 }
 async function publish(ctx, w) {
   const uid = ctx.from.id;
@@ -12619,6 +12685,8 @@ ${hint}${current ? `
     }
     case "shots":
       return showShots(ctx, num2(a1));
+    case "preview":
+      return sendPreview(ctx, num2(a1));
     case "repo":
       return showRepo(ctx, num2(a1));
     case "repoedit": {
@@ -12648,7 +12716,7 @@ ${esc(plugin2.repoUrl)}` : "";
     case "del": {
       const { plugin: plugin2 } = await accessible(ctx, num2(a1));
       return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D <b>${esc(plugin2.name)}</b>?
-\u0412\u0441\u0435 \u0432\u0435\u0440\u0441\u0438\u0438 \u043F\u0440\u043E\u043F\u0430\u0434\u0443\u0442 \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430 \u0438 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0430, \u0441\u0447\u0451\u0442\u0447\u0438\u043A \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043E\u043A \u043E\u0431\u043D\u0443\u043B\u0438\u0442\u0441\u044F.`, new import_grammy7.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `p:delok:${plugin2.rid}`).text("\u041D\u0435\u0442", `p:open:${plugin2.rid}`));
+\u0412\u0441\u0435 \u0432\u0435\u0440\u0441\u0438\u0438 \u043F\u0440\u043E\u043F\u0430\u0434\u0443\u0442 \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430 \u0438 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0430, \u0441\u0447\u0451\u0442\u0447\u0438\u043A \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043E\u043A \u043E\u0431\u043D\u0443\u043B\u0438\u0442\u0441\u044F.`, new import_grammy7.InlineKeyboard().add(btn("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `p:delok:${plugin2.rid}`, "danger")).text("\u041D\u0435\u0442", `p:open:${plugin2.rid}`));
     }
     case "delok": {
       const { plugin: plugin2 } = await accessible(ctx, num2(a1));
@@ -12702,7 +12770,7 @@ async function versionRoute(ctx, action, vrid) {
       return showVersion(ctx, vrid);
     }
     case "del":
-      return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0432\u0435\u0440\u0441\u0438\u044E <b>${esc(plugin2.name)} ${esc(v2.version)}</b>? \u0424\u0430\u0439\u043B \u0431\u0443\u0434\u0435\u0442 \u0443\u0434\u0430\u043B\u0451\u043D \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430.`, new import_grammy7.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `v:delok:${vrid}`).text("\u041D\u0435\u0442", `v:open:${vrid}`));
+      return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0432\u0435\u0440\u0441\u0438\u044E <b>${esc(plugin2.name)} ${esc(v2.version)}</b>? \u0424\u0430\u0439\u043B \u0431\u0443\u0434\u0435\u0442 \u0443\u0434\u0430\u043B\u0451\u043D \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430.`, new import_grammy7.InlineKeyboard().add(btn("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `v:delok:${vrid}`, "danger")).text("\u041D\u0435\u0442", `v:open:${vrid}`));
     case "delok": {
       try {
         await unpublishVersion(ctx.api, vrid, "delete");
@@ -12732,10 +12800,15 @@ async function showHelp(ctx) {
 // ==/InuPlugin==</pre>`,
     "",
     "<b>\u041F\u0440\u0430\u0432\u0438\u043B\u0430</b>",
-    "\u2022 \u0412\u0435\u0440\u0441\u0438\u044F \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C \u0441\u0442\u0440\u043E\u0433\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u043F\u0440\u0435\u0434\u044B\u0434\u0443\u0449\u0435\u0439 (semver).",
-    "\u2022 id \u0437\u0430\u043D\u044F\u0442 \u043F\u0435\u0440\u0432\u044B\u043C \u0430\u0432\u0442\u043E\u0440\u043E\u043C; \u0447\u0443\u0436\u043E\u0439 id \u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043D\u0435\u043B\u044C\u0437\u044F.",
-    "\u2022 \u0414\u0435\u0440\u0436\u0438\u0442\u0435 <code>@id</code> \u0432 \u0444\u0430\u0439\u043B\u0435 \u043D\u0435\u0438\u0437\u043C\u0435\u043D\u043D\u044B\u043C \u2014 \u043F\u043E \u043D\u0435\u043C\u0443 \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u0435 \u0440\u0435\u0448\u0430\u0435\u0442, \u043E\u0431\u043D\u043E\u0432\u0438\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D \u0438\u043B\u0438 \u043F\u043E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u043D\u043E\u0432\u044B\u0439.",
-    "\u2022 \u0413\u0440\u0430\u043D\u0442\u044B \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 \u0441\u0430\u043C\u043E \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u0435 \u043F\u0440\u0438 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0435; \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435 \u043E\u043D\u0438 \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u043F\u0440\u0430\u0432\u043E\u0447\u043D\u044B\u0435."
+    "<blockquote expandable>" + [
+      "\u2022 \u0412\u0435\u0440\u0441\u0438\u044F \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C \u0441\u0442\u0440\u043E\u0433\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u043F\u0440\u0435\u0434\u044B\u0434\u0443\u0449\u0435\u0439 (semver).",
+      "\u2022 id \u0437\u0430\u043D\u044F\u0442 \u043F\u0435\u0440\u0432\u044B\u043C \u0430\u0432\u0442\u043E\u0440\u043E\u043C; \u0447\u0443\u0436\u043E\u0439 id \u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043D\u0435\u043B\u044C\u0437\u044F.",
+      "\u2022 \u0423 \u043A\u0430\u0436\u0434\u043E\u0433\u043E \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C \u0441\u0441\u044B\u043B\u043A\u0430 \u043D\u0430 \u043F\u0443\u0431\u043B\u0438\u0447\u043D\u044B\u0439 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439.",
+      "\u2022 \u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B \u2014 \u0434\u043E 8 \u0444\u043E\u0442\u043E, \u043C\u0435\u043D\u044C\u0448\u0430\u044F \u0441\u0442\u043E\u0440\u043E\u043D\u0430 \u043E\u0442 320 px.",
+      "\u2022 \u0414\u0435\u0440\u0436\u0438\u0442\u0435 <code>@id</code> \u0432 \u0444\u0430\u0439\u043B\u0435 \u043D\u0435\u0438\u0437\u043C\u0435\u043D\u043D\u044B\u043C \u2014 \u043F\u043E \u043D\u0435\u043C\u0443 \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u0435 \u0440\u0435\u0448\u0430\u0435\u0442, \u043E\u0431\u043D\u043E\u0432\u0438\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D \u0438\u043B\u0438 \u043F\u043E\u0441\u0442\u0430\u0432\u0438\u0442\u044C \u043D\u043E\u0432\u044B\u0439.",
+      "\u2022 \u0413\u0440\u0430\u043D\u0442\u044B \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 \u0441\u0430\u043C\u043E \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u0435 \u043F\u0440\u0438 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0435; \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435 \u043E\u043D\u0438 \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u043F\u0440\u0430\u0432\u043E\u0447\u043D\u044B\u0435."
+    ].join(`
+`) + "</blockquote>"
   ].join(`
 `);
   await screen(ctx, text, nav(new import_grammy7.InlineKeyboard().url("\uD83D\uDCE3 \u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043D\u0430\u043B", `https://t.me/${config().channelUsername}`).row()));
@@ -12749,7 +12822,7 @@ async function showMyPlugins(ctx, page) {
   for (const pl of rows)
     kb.text(`${pl.hidden ? "\uD83D\uDE48 " : ""}${pl.name}`, `p:open:${pl.rid}`).row();
   pagerRow(kb, "p:list", p2, total);
-  kb.text("\uD83D\uDCE4 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D", "w:pub").row();
+  kb.add(btn("\uD83D\uDCE4 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D", "w:pub", "primary")).row();
   nav(kb);
   await screen(ctx, total ? `<b>\u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B</b> (${total})` : `<b>\u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B</b>
 \u041F\u043E\u043A\u0430 \u043F\u0443\u0441\u0442\u043E \u2014 \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u0443\u0439\u0442\u0435 \u043F\u0435\u0440\u0432\u044B\u0439.`, kb);
@@ -12765,7 +12838,7 @@ async function showPlugin(ctx, rid) {
     `\u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0438: ${installs}`,
     plugin2.repoUrl ? `\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439: ${esc(plugin2.repoUrl)}` : "\u26A0\uFE0F \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D \u2014 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u043D\u0435\u0442 \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435",
     desc ? `
-${esc(desc)}` : "",
+<blockquote expandable>${esc(desc)}</blockquote>` : "",
     "",
     total ? "<b>\u0412\u0435\u0440\u0441\u0438\u0438</b>" : "\u0412\u0435\u0440\u0441\u0438\u0439 \u043F\u043E\u043A\u0430 \u043D\u0435\u0442.",
     ...rows.map((v2) => `${STATUS_ICON[v2.status] ?? "\u2022"} <code>${esc(v2.version)}</code> \xB7 ${STATUS_NAME[v2.status] ?? v2.status} \xB7 ${when(v2.date)}`),
@@ -12776,6 +12849,7 @@ ${esc(desc)}` : "",
     kb.text("\u041D\u043E\u0432\u0430\u044F \u0432\u0435\u0440\u0441\u0438\u044F", `p:newv:${rid}`).text("\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", `p:desc:${rid}`).row();
     kb.text("\u0418\u043A\u043E\u043D\u043A\u0430", `p:icon:${rid}`).text("\u0410\u0432\u0442\u043E\u0440", `p:auth:${rid}`).row();
     kb.text("\uD83D\uDD17 \u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439", `p:repo:${rid}`).text("\uD83D\uDDBC \u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B", `p:shots:${rid}`).row();
+    kb.text("\uD83D\uDC41 \u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440", `p:preview:${rid}`).row();
   }
   if (!owner)
     kb.text("\uD83D\uDDBC \u0421\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u044B", `p:shots:${rid}`).row();
@@ -12827,7 +12901,7 @@ async function shotRoute(ctx, action, rid, arg) {
     }
     case "del": {
       const shot = await shotOf();
-      return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u2116${shot.position + 1} \u043F\u043B\u0430\u0433\u0438\u043D\u0430 <b>${esc(plugin2.name)}</b>? \u0424\u043E\u0442\u043E \u0431\u0443\u0434\u0435\u0442 \u0443\u0434\u0430\u043B\u0435\u043D\u043E \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430.`, new import_grammy7.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `s:delok:${rid}:${shot.id}`).text("\u041D\u0435\u0442", `p:shots:${rid}`));
+      return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442 \u2116${shot.position + 1} \u043F\u043B\u0430\u0433\u0438\u043D\u0430 <b>${esc(plugin2.name)}</b>? \u0424\u043E\u0442\u043E \u0431\u0443\u0434\u0435\u0442 \u0443\u0434\u0430\u043B\u0435\u043D\u043E \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430.`, new import_grammy7.InlineKeyboard().add(btn("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `s:delok:${rid}:${shot.id}`, "danger")).text("\u041D\u0435\u0442", `p:shots:${rid}`));
     }
     case "delok": {
       const shot = await shotOf();
@@ -12853,12 +12927,12 @@ async function showShots(ctx, rid) {
   ];
   const kb = new import_grammy7.InlineKeyboard;
   list.forEach((s, i) => {
-    kb.text(`#${i + 1}`, "x:noop");
+    kb.add(label(`#${i + 1}`));
     if (owner && i > 0)
       kb.text("\u25C0", `s:left:${rid}:${s.id}`);
     if (owner && i < list.length - 1)
       kb.text("\u25B6", `s:right:${rid}:${s.id}`);
-    kb.text("\uD83D\uDDD1", `s:del:${rid}:${s.id}`).row();
+    kb.add(btn("\uD83D\uDDD1", `s:del:${rid}:${s.id}`, "danger")).row();
   });
   if (owner && list.length < MAX_SCREENSHOTS)
     kb.text("\u2795 \u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C", `s:add:${rid}`);
@@ -12868,6 +12942,19 @@ async function showShots(ctx, rid) {
   nav(kb, `p:open:${rid}`);
   await screen(ctx, lines.join(`
 `), kb);
+}
+async function sendPreview(ctx, rid) {
+  const { plugin: plugin2 } = await accessible(ctx, rid);
+  const [{ rows }, shots, installs] = await Promise.all([listVersions(plugin2.id), listScreenshots(plugin2.id), installCount(plugin2.id)]);
+  const rich = buildPreview({ plugin: plugin2, installs, versions: rows, screenshots: shots, channelUsername: config().channelUsername });
+  try {
+    await ctx.api.sendRichMessage(ctx.chat.id, rich);
+  } catch (e) {
+    log("warn", "rich preview failed", { error: errText(e) });
+    if (shots.length)
+      await ctx.replyWithMediaGroup(shots.map((s) => ({ type: "photo", media: s.fileId }))).catch(() => {});
+    return "\u041F\u0440\u0435\u0434\u043F\u0440\u043E\u0441\u043C\u043E\u0442\u0440 \u043D\u0435\u0434\u043E\u0441\u0442\u0443\u043F\u0435\u043D \u0432 \u044D\u0442\u043E\u043C \u043A\u043B\u0438\u0435\u043D\u0442\u0435";
+  }
 }
 async function showRepo(ctx, rid) {
   const { plugin: plugin2, owner } = await accessible(ctx, rid);

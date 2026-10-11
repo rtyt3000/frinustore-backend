@@ -8,6 +8,7 @@ import { publishVersion, refreshCatalog, errText } from './publish.ts'
 import { compareSemver, maxSemver } from './semver.ts'
 import * as store from './store.ts'
 import { esc, grantsBlock } from './text.ts'
+import { btn } from './ui.ts'
 import type { Description } from './validate.ts'
 
 export interface Fields {
@@ -170,7 +171,7 @@ export function modCard(v: store.Version, p: store.Plugin, reasons: string[]): s
 }
 
 export function modKeyboard(rid: number): InlineKeyboard {
-  return new InlineKeyboard().text('✅ Одобрить', `a:ok:${rid}`).text('❌ Отклонить', `a:no:${rid}`)
+  return new InlineKeyboard().add(btn('✅ Одобрить', `a:ok:${rid}`, 'success'), btn('❌ Отклонить', `a:no:${rid}`, 'danger'))
 }
 
 export async function notifyModerators(api: Api, v: store.Version, reasons: string[]): Promise<void> {

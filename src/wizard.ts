@@ -8,7 +8,7 @@ import { compareSemver, maxSemver } from './semver.ts'
 import * as store from './store.ts'
 import { checkTarget, needsModeration, submit, type Fields } from './submit.ts'
 import { esc, grantsBlock } from './text.ts'
-import { nav, screen, showHome, Stale } from './ui.ts'
+import { btn, nav, screen, showHome, Stale } from './ui.ts'
 import {
   validateChangelog,
   validateDescription,
@@ -108,6 +108,7 @@ export async function onDocument(ctx: Context): Promise<void> {
   if (!/\.inu\.js$/i.test(doc.file_name ?? '')) return void (await reject('Нужен файл с расширением .inu.js'))
   if ((doc.file_size ?? 0) > MAX_FILE_BYTES) return void (await reject('Файл больше 5 МБ'))
 
+  await ctx.replyWithChatAction('upload_document').catch(() => {}) // the download below can take a moment
   let buf: Uint8Array
   try {
     const f = await ctx.api.getFile(doc.file_id)
@@ -429,7 +430,7 @@ async function renderCard(ctx: Context, w: Wiz): Promise<void> {
   await screen(
     ctx,
     lines.filter(Boolean).join('\n'),
-    new InlineKeyboard().text('✅ Опубликовать', 'w:go').text('Отмена', 'w:cancel'),
+    new InlineKeyboard().add(btn('✅ Опубликовать', 'w:go', 'success')).text('Отмена', 'w:cancel'),
   )
 }
 

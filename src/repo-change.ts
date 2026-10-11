@@ -5,6 +5,7 @@ import { errText, refreshCatalog } from './publish.ts'
 import { checkRepo, normalizeRepo, repoWarningText, type CheckDeps } from './repo.ts'
 import * as store from './store.ts'
 import { esc } from './text.ts'
+import { btn } from './ui.ts'
 
 export type RepoChangeResult =
   | { kind: 'error'; message: string }
@@ -64,7 +65,7 @@ export function repoChangeCard(c: store.RepoChange, plugin: store.Plugin): strin
     .join('\n')
 }
 
-export const repoChangeKeyboard = (id: number) => new InlineKeyboard().text('✅ Одобрить', `a:rok:${id}`).text('❌ Отклонить', `a:rno:${id}`)
+export const repoChangeKeyboard = (id: number) => new InlineKeyboard().add(btn('✅ Одобрить', `a:rok:${id}`, 'success'), btn('❌ Отклонить', `a:rno:${id}`, 'danger'))
 
 async function notifyModerators(api: Api, c: store.RepoChange, plugin: store.Plugin): Promise<void> {
   const cfg = config()

@@ -1,8 +1,21 @@
 import { InlineKeyboard, type Context } from 'grammy'
+import type { InlineKeyboardButton } from 'grammy/types'
 import { isAdmin } from './config.ts'
 import { errText } from './publish.ts'
 
 export const PAGE_SIZE = 8
+
+export type ButtonStyle = 'primary' | 'success' | 'danger'
+
+/** callback button with a colour (Bot API 9.4 `style`) */
+export const btn = (text: string, data: string, style?: ButtonStyle): InlineKeyboardButton => ({
+  text,
+  callback_data: data,
+  ...(style ? { style } : {}),
+})
+
+/** a button that only shows text (Bot API 10.3 `disabled`): no callback, no spinner */
+export const label = (text: string): InlineKeyboardButton => ({ text, disabled: {} })
 
 /** thrown by handlers when a button no longer applies (old message, deleted plugin, no rights) */
 export class Stale extends Error {
@@ -19,7 +32,7 @@ export function pagerRow(kb: InlineKeyboard, prefix: string, page: number, total
   const pages = pageCount(total)
   if (pages <= 1) return kb
   if (page > 0) kb.text('‹', `${prefix}:${page - 1}`)
-  kb.text(`${page + 1}/${pages}`, 'x:noop')
+  kb.add(label(`${page + 1}/${pages}`))
   if (page < pages - 1) kb.text('›', `${prefix}:${page + 1}`)
   return kb.row()
 }
@@ -31,7 +44,7 @@ export function nav(kb: InlineKeyboard, back?: string): InlineKeyboard {
 }
 
 export function homeKeyboard(userId: number): InlineKeyboard {
-  const kb = new InlineKeyboard().text('📤 Опубликовать плагин', 'w:pub').row().text('📦 Мои плагины', 'p:list:0').row().text('ℹ️ Помощь', 'm:help').row()
+  const kb = new InlineKeyboard().add(btn('📤 Опубликовать плагин', 'w:pub', 'primary')).row().text('📦 Мои плагины', 'p:list:0').row().text('ℹ️ Помощь', 'm:help').row()
   if (isAdmin(userId)) kb.text('🛡 Модерация', 'a:home').row()
   return kb
 }
