@@ -13,3 +13,4 @@ for (const e of entries) {
   }
   console.log(`${e.entry} -> ${e.dir}/${e.name}`)
 }
+export {}
