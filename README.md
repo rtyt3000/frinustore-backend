@@ -18,7 +18,7 @@ bun run typecheck
 ## Деплой (Vercel)
 
 1. Env (Production и отдельные тестовые для Preview): `BOT_TOKEN`, `WEBHOOK_SECRET`, `CRON_SECRET`, `DATABASE_URL` (pooled Neon),
-   `CHANNEL_ID` (`-100…`), `CHANNEL_USERNAME`, `ADMIN_IDS`, `MODERATION`, `DAILY_LIMIT`, опционально `MOD_CHAT_ID`.
+   `CHANNEL_ID` (`-100…`), `CHANNEL_USERNAME`, `ADMIN_IDS`, `MODERATION`, `DAILY_LIMIT`, опционально `MOD_CHAT_ID` и `REPO_HOSTS` (разрешённые хосты репозиториев через запятую; по умолчанию github.com, gitlab.com, codeberg.org, bitbucket.org, git.sr.ht, gitea.com).
 2. Бот — администратор канала (публикация, редактирование, закрепление); в BotFather включить inline mode (`/setinline`).
 3. `bun run migrate` выполняется как `buildCommand`.
 4. После деплоя: `WEBHOOK_URL=https://<project>.vercel.app/api/webhook bun run set-webhook`.
@@ -38,6 +38,7 @@ Cron (`/api/cron/flush`, раз в сутки — лимит Hobby) выноси
 | `src/submit.ts` | проверки, решение о модерации, карточки модераторам |
 | `src/publish.ts` | публикация/откат, пересборка и закреп `catalog.json` под lease-локом |
 | `src/catalog.ts`, `src/plugin-header.ts`, `src/semver.ts`, `src/validate.ts` | чистая логика (покрыта тестами) |
+| `src/repo.ts`, `src/repo-change.ts` | ссылка на репозиторий: валидация, проверка доступности с защитой от SSRF, смена через модерацию |
 | `src/store.ts`, `src/db.ts`, `migrations/` | Postgres |
 
 Пересборка каталога сериализуется lease-локом в `meta` (advisory-локи не работают поверх HTTP-драйвера Neon).

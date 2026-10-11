@@ -3,6 +3,7 @@ import { isAdmin } from './config.ts'
 import { analyzeGrants } from './plugin-header.ts'
 import { errText, refreshCatalog } from './publish.ts'
 import * as store from './store.ts'
+import { approveRepoChange, rejectRepoChange, repoChangeCard, repoChangeKeyboard } from './repo-change.ts'
 import { approve, modCard, modKeyboard, reject } from './submit.ts'
 import { esc } from './text.ts'
 import { PAGE_SIZE, Stale, clampPage, nav, pagerRow, screen } from './ui.ts'
@@ -43,6 +44,26 @@ export async function handleAdmin(ctx: Context, action: string, arg?: string): P
       if (ctx.chat?.type !== 'private') return 'Откройте бота в личке и пришлите причину отклонения'
       return screen(ctx, `Пришлите причину отклонения для <code>${esc(v.pluginId)} ${esc(v.version)}</code>.`, new InlineKeyboard().text('Отмена', `a:card:${v.rid}`))
     }
+    case 'rq':
+      return showRepoQueue(ctx, num(arg ?? '0'))
+    case 'rcard':
+      return showRepoCard(ctx, num(arg))
+    case 'rok': {
+      const r = await approveRepoChange(ctx.api, num(arg), nameOf(ctx))
+      if (!r.ok) return r.message
+      // a card in a moderator chat is rewritten by approveRepoChange(); a menu screen goes back to the queue
+      if (ctx.callbackQuery?.message && 'text' in ctx.callbackQuery.message && !ctx.callbackQuery.message.text?.includes('Смена репозитория:')) {
+        return showRepoQueue(ctx, 0)
+      }
+      return
+    }
+    case 'rno': {
+      const c = await store.getRepoChange(num(arg))
+      if (!c || c.status !== 'pending') return 'Заявка уже обработана'
+      await store.setSession(ctx.from!.id, 'await_reject_repo', { id: c.id })
+      if (ctx.chat?.type !== 'private') return 'Откройте бота в личке и пришлите причину отклонения'
+      return screen(ctx, `Пришлите причину отклонения смены репозитория для <code>${esc(c.pluginId)}</code>.`, new InlineKeyboard().text('Отмена', `a:rcard:${c.id}`))
+    }
     case 'all':
       return showAllPlugins(ctx, num(arg ?? '0'))
     case 'bans':
@@ -80,6 +101,14 @@ export async function onAdminText(ctx: Context, s: store.Session, text: string):
     await ctx.reply(r.ok ? '❌ Отклонено, автору отправлено уведомление.' : r.message, { reply_markup: nav(new InlineKeyboard().text('Очередь', 'a:q:0').row()) })
     return
   }
+  if (s.state === 'await_reject_repo') {
+    const reason = text.trim().slice(0, 300)
+    if (!reason) return void (await ctx.reply('Причина не может быть пустой.'))
+    await store.clearSession(ctx.from!.id)
+    const r = await rejectRepoChange(ctx.api, s.payload.id, reason, nameOf(ctx))
+    await ctx.reply(r.ok ? '❌ Отклонено, автору отправлено уведомление.' : r.message, { reply_markup: nav(new InlineKeyboard().text('Заявки', 'a:rq:0').row()) })
+    return
+  }
   if (s.state === 'await_ban') {
     const id = Number(text.trim())
     if (!Number.isSafeInteger(id) || id <= 0) return void (await ctx.reply('Нужен числовой user id.'))
@@ -92,9 +121,15 @@ export async function onAdminText(ctx: Context, s: store.Session, text: string):
 // ---- screens
 
 async function showAdminHome(ctx: Context): Promise<void> {
-  const [{ total: pending }, { total: plugins }] = await Promise.all([store.listPendingVersions(0, 1), store.listPlugins({ offset: 0, limit: 1 })])
+  const [{ total: pending }, { total: plugins }, { total: repos }] = await Promise.all([
+    store.listPendingVersions(0, 1),
+    store.listPlugins({ offset: 0, limit: 1 }),
+    store.listPendingRepoChanges(0, 1),
+  ])
   const kb = new InlineKeyboard()
     .text(`📥 Очередь заявок (${pending})`, 'a:q:0')
+    .row()
+    .text(`🔗 Смена репозитория (${repos})`, 'a:rq:0')
     .row()
     .text(`📚 Все плагины (${plugins})`, 'a:all:0')
     .row()
@@ -132,6 +167,28 @@ async function showCard(ctx: Context, rid: number): Promise<void> {
   }
   nav(kb, 'a:q:0')
   await screen(ctx, `${modCard(v, p, [])}\n\nСтатус: ${v.status}`, kb)
+}
+
+async function showRepoQueue(ctx: Context, page: number): Promise<void> {
+  const first = await store.listPendingRepoChanges(0, 1)
+  const p = clampPage(page, first.total)
+  const { rows, total } = await store.listPendingRepoChanges(p * PAGE_SIZE, PAGE_SIZE)
+  const kb = new InlineKeyboard()
+  for (const c of rows) kb.text(c.pluginName, `a:rcard:${c.id}`).row()
+  pagerRow(kb, 'a:rq', p, total)
+  nav(kb, 'a:home')
+  await screen(ctx, total ? `<b>Смена репозитория</b> (${total})` : '<b>Смена репозитория</b>\nПусто.', kb)
+}
+
+async function showRepoCard(ctx: Context, id: number): Promise<void> {
+  const c = await store.getRepoChange(id)
+  const plugin = c && (await store.getPlugin(c.pluginId))
+  if (!c || !plugin) throw new Stale()
+  const kb = new InlineKeyboard()
+  if (c.status === 'pending') for (const b of repoChangeKeyboard(id).inline_keyboard[0]!) kb.text(b.text, (b as { callback_data: string }).callback_data)
+  kb.row()
+  nav(kb, 'a:rq:0')
+  await screen(ctx, c.status === 'pending' ? repoChangeCard(c, plugin) : `${repoChangeCard(c, plugin)}\n\nСтатус: ${c.status}`, kb)
 }
 
 async function showAllPlugins(ctx: Context, page: number): Promise<void> {

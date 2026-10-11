@@ -5525,7 +5525,7 @@ var MAX_CATALOG_BYTES = 1024 * 1024;
 function buildCatalog(plugins, versions, installs, now) {
   const out = [];
   for (const p of plugins) {
-    if (p.hidden)
+    if (p.hidden || !p.repo)
       continue;
     const vs = versions.filter((v) => v.pluginId === p.id && v.status === "approved" && v.msgId !== null).sort((a, b) => b.date - a.date || compareSemver(b.version, a.version)).map((v) => {
       const cv = { version: v.version, msgId: v.msgId, date: v.date };
@@ -5543,6 +5543,7 @@ function buildCatalog(plugins, versions, installs, now) {
       author: p.author,
       description: p.description,
       icon: p.icon,
+      repo: p.repo,
       installs: installs.get(p.id) ?? 0,
       versions: vs
     });
@@ -10635,6 +10636,8 @@ var plugin = (r) => ({
   author: r.author,
   description: r.description_json,
   icon: r.icon,
+  repoUrl: r.repo_url ?? null,
+  repoWarning: r.repo_warning ?? null,
   hidden: r.hidden,
   createdAt: Number(r.created_at)
 });
@@ -10730,7 +10733,7 @@ async function writeCatalogMessage(api, json) {
 }
 async function rebuildLocked(api, force) {
   const [plugins, versions, installs] = await Promise.all([allPlugins(), allVersions(), installCounts()]);
-  const catalog = buildCatalog(plugins.map((p2) => ({ id: p2.id, name: p2.name, author: p2.author, description: p2.description, icon: p2.icon, hidden: p2.hidden })), versions.map((v2) => ({
+  const catalog = buildCatalog(plugins.map((p2) => ({ id: p2.id, name: p2.name, author: p2.author, description: p2.description, icon: p2.icon, repo: p2.repoUrl, hidden: p2.hidden })), versions.map((v2) => ({
     pluginId: v2.pluginId,
     version: v2.version,
     msgId: v2.msgId,

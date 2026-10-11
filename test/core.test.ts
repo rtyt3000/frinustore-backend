@@ -113,6 +113,7 @@ const plugin = (id: string, over: Partial<PluginRow> = {}): PluginRow => ({
   author: 'a',
   description: '',
   icon: 'inu://bot',
+  repo: 'https://github.com/o/r',
   hidden: false,
   ...over,
 })
@@ -151,6 +152,15 @@ describe('catalog', () => {
     expect(b.versions[0]).toEqual({ version: '1.1.0', msgId: 12, date: 300, changelog: 'fix', grants: ['x'] })
     expect(b.versions[1]).toEqual({ version: '1.0.0', msgId: 11, date: 200 })
     expect(c.plugins[0]!.installs).toBe(5)
+  })
+  test('a plugin without a repository is never listed', () => {
+    const c = buildCatalog([plugin('a', { repo: null }), plugin('b')], [ver('a', '1.0.0'), ver('b', '1.0.0')], new Map(), 1)
+    expect(c.plugins.map((p) => p.id)).toEqual(['b'])
+    expect(c.plugins[0]!.repo).toBe('https://github.com/o/r')
+  })
+  test('field order follows the client schema: icon, repo, installs', () => {
+    const c = buildCatalog([plugin('a')], [ver('a', '1.0.0')], new Map(), 1)
+    expect(Object.keys(c.plugins[0]!)).toEqual(['id', 'name', 'author', 'description', 'icon', 'repo', 'installs', 'versions'])
   })
   test('a version without a file message is never listed', () => {
     const c = buildCatalog([plugin('a')], [ver('a', '1.0.0', { msgId: null })], new Map(), 1)

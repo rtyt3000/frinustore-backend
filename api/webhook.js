@@ -5444,13 +5444,13 @@ var require_mod = __commonJS(function(exports) {
 });
 
 // src/entry/webhook.ts
-var import_grammy8 = __toESM(require_mod(), 1);
+var import_grammy9 = __toESM(require_mod(), 1);
 
 // src/bot.ts
-var import_grammy7 = __toESM(require_mod(), 1);
+var import_grammy8 = __toESM(require_mod(), 1);
 
 // src/admin.ts
-var import_grammy4 = __toESM(require_mod(), 1);
+var import_grammy5 = __toESM(require_mod(), 1);
 
 // src/config.ts
 var cached;
@@ -5577,7 +5577,7 @@ var MAX_CATALOG_BYTES = 1024 * 1024;
 function buildCatalog(plugins, versions, installs, now) {
   const out = [];
   for (const p of plugins) {
-    if (p.hidden)
+    if (p.hidden || !p.repo)
       continue;
     const vs = versions.filter((v) => v.pluginId === p.id && v.status === "approved" && v.msgId !== null).sort((a, b) => b.date - a.date || compareSemver(b.version, a.version)).map((v) => {
       const cv = { version: v.version, msgId: v.msgId, date: v.date };
@@ -5595,6 +5595,7 @@ function buildCatalog(plugins, versions, installs, now) {
       author: p.author,
       description: p.description,
       icon: p.icon,
+      repo: p.repo,
       installs: installs.get(p.id) ?? 0,
       versions: vs
     });
@@ -10696,7 +10697,20 @@ var plugin = (r) => ({
   author: r.author,
   description: r.description_json,
   icon: r.icon,
+  repoUrl: r.repo_url ?? null,
+  repoWarning: r.repo_warning ?? null,
   hidden: r.hidden,
+  createdAt: Number(r.created_at)
+});
+var repoChange = (r) => ({
+  id: Number(r.id),
+  pluginId: r.plugin_id,
+  repoUrl: r.repo_url,
+  warning: r.warning,
+  status: r.status,
+  submitter: Number(r.submitter_id),
+  rejectReason: r.reject_reason,
+  modMsgs: r.mod_msgs ?? [],
   createdAt: Number(r.created_at)
 });
 var version = (r) => ({
@@ -10740,8 +10754,8 @@ async function getPluginByRid(rid) {
   return r && plugin(r);
 }
 async function createPlugin(p2) {
-  const r = await q(`INSERT INTO plugins (id, owner_user_id, name, author, description_json, icon, created_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) ON CONFLICT (id) DO NOTHING RETURNING id`, [p2.id, p2.owner, p2.name, p2.author, JSON.stringify(p2.description), p2.icon, now()]);
+  const r = await q(`INSERT INTO plugins (id, owner_user_id, name, author, description_json, icon, repo_url, repo_warning, repo_checked_at, created_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $9) ON CONFLICT (id) DO NOTHING RETURNING id`, [p2.id, p2.owner, p2.name, p2.author, JSON.stringify(p2.description), p2.icon, p2.repoUrl, p2.repoWarning, now()]);
   return r.length > 0;
 }
 async function updatePlugin(id, patch) {
@@ -10761,6 +10775,12 @@ async function updatePlugin(id, patch) {
     add("icon", patch.icon);
   if (patch.hidden !== undefined)
     add("hidden", patch.hidden);
+  if (patch.repoUrl !== undefined) {
+    add("repo_url", patch.repoUrl);
+    add("repo_checked_at", now());
+  }
+  if (patch.repoWarning !== undefined)
+    add("repo_warning", patch.repoWarning);
   if (sets.length)
     await q(`UPDATE plugins SET ${sets.join(", ")} WHERE id = $1`, params);
 }
@@ -10776,6 +10796,32 @@ async function listPlugins(opts) {
 }
 async function allPlugins() {
   return (await q("SELECT * FROM plugins ORDER BY rid")).map(plugin);
+}
+async function createRepoChange(pluginId, repoUrl, warning, submitter) {
+  const r = await one(`INSERT INTO repo_changes (plugin_id, repo_url, warning, status, submitter_id, created_at)
+     VALUES ($1, $2, $3, 'pending', $4, $5) ON CONFLICT (plugin_id) WHERE status = 'pending' DO NOTHING RETURNING *`, [pluginId, repoUrl, warning, submitter, now()]);
+  return r && repoChange(r);
+}
+async function getRepoChange(id) {
+  const r = await one("SELECT * FROM repo_changes WHERE id = $1", [id]);
+  return r && repoChange(r);
+}
+async function pendingRepoChange(pluginId) {
+  const r = await one("SELECT * FROM repo_changes WHERE plugin_id = $1 AND status = 'pending'", [pluginId]);
+  return r && repoChange(r);
+}
+async function decideRepoChange(id, status, reason) {
+  const r = await one("UPDATE repo_changes SET status = $2, reject_reason = $3 WHERE id = $1 AND status = 'pending' RETURNING *", [id, status, reason ?? null]);
+  return r && repoChange(r);
+}
+async function setRepoChangeMods(id, msgs) {
+  await q("UPDATE repo_changes SET mod_msgs = $2::jsonb WHERE id = $1", [id, JSON.stringify(msgs)]);
+}
+async function listPendingRepoChanges(offset, limit) {
+  const total = Number((await one("SELECT count(*) AS n FROM repo_changes WHERE status = 'pending'")).n);
+  const rows = await q(`SELECT c.*, p.name AS plugin_name FROM repo_changes c JOIN plugins p ON p.id = c.plugin_id
+     WHERE c.status = 'pending' ORDER BY c.created_at, c.id LIMIT $1 OFFSET $2`, [limit, offset]);
+  return { rows: rows.map((r) => ({ ...repoChange(r), pluginName: r.plugin_name })), total };
 }
 async function getVersion(rid) {
   const r = await one("SELECT * FROM versions WHERE rid = $1", [rid]);
@@ -10904,7 +10950,7 @@ async function enqueueJob(type) {
 }
 async function dumpAll() {
   const out = {};
-  for (const t of ["users", "plugins", "versions", "installs", "meta", "sessions"]) {
+  for (const t of ["users", "plugins", "versions", "repo_changes", "installs", "meta", "sessions"]) {
     out[t] = await q(`SELECT * FROM ${t}`);
   }
   return out;
@@ -10938,7 +10984,7 @@ async function writeCatalogMessage(api, json) {
 }
 async function rebuildLocked(api, force) {
   const [plugins, versions, installs] = await Promise.all([allPlugins(), allVersions(), installCounts()]);
-  const catalog = buildCatalog(plugins.map((p2) => ({ id: p2.id, name: p2.name, author: p2.author, description: p2.description, icon: p2.icon, hidden: p2.hidden })), versions.map((v2) => ({
+  const catalog = buildCatalog(plugins.map((p2) => ({ id: p2.id, name: p2.name, author: p2.author, description: p2.description, icon: p2.icon, repo: p2.repoUrl, hidden: p2.hidden })), versions.map((v2) => ({
     pluginId: v2.pluginId,
     version: v2.version,
     msgId: v2.msgId,
@@ -11051,8 +11097,123 @@ async function refreshAfterEdit(api) {
   return refreshCatalog(api);
 }
 
-// src/submit.ts
+// src/repo-change.ts
 var import_grammy2 = __toESM(require_mod(), 1);
+
+// src/repo.ts
+import { lookup } from "dns/promises";
+import { isIP } from "net";
+var DEFAULT_REPO_HOSTS = ["github.com", "gitlab.com", "codeberg.org", "bitbucket.org", "git.sr.ht", "gitea.com"];
+var MAX_REPO_LENGTH = 200;
+function allowedHosts(env = process.env.REPO_HOSTS) {
+  const extra = (env ?? "").split(",").map((h2) => h2.trim().toLowerCase()).filter(Boolean);
+  return extra.length ? extra : DEFAULT_REPO_HOSTS;
+}
+function normalizeRepo(raw, hosts = allowedHosts()) {
+  const text = raw.trim();
+  if (!text)
+    return { ok: false, error: "\u0441\u0441\u044B\u043B\u043A\u0430 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u043F\u0443\u0441\u0442\u043E\u0439" };
+  if (/\s/.test(text))
+    return { ok: false, error: "\u0432 \u0441\u0441\u044B\u043B\u043A\u0435 \u043D\u0435 \u0434\u043E\u043B\u0436\u043D\u043E \u0431\u044B\u0442\u044C \u043F\u0440\u043E\u0431\u0435\u043B\u043E\u0432" };
+  if (text.length > MAX_REPO_LENGTH + 20)
+    return { ok: false, error: `\u0441\u0441\u044B\u043B\u043A\u0430 \u0434\u043B\u0438\u043D\u043D\u0435\u0435 ${MAX_REPO_LENGTH} \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432` };
+  let u;
+  try {
+    u = new URL(text);
+  } catch {
+    return { ok: false, error: "\u044D\u0442\u043E \u043D\u0435 \u043F\u043E\u0445\u043E\u0436\u0435 \u043D\u0430 \u0441\u0441\u044B\u043B\u043A\u0443, \u043D\u0443\u0436\u0435\u043D \u0430\u0434\u0440\u0435\u0441 \u0432\u0438\u0434\u0430 https://github.com/\u0430\u0432\u0442\u043E\u0440/\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439" };
+  }
+  if (u.protocol !== "https:")
+    return { ok: false, error: "\u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u044B \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u0441\u044B\u043B\u043A\u0438 https://" };
+  if (u.username || u.password)
+    return { ok: false, error: "\u0432 \u0441\u0441\u044B\u043B\u043A\u0435 \u043D\u0435 \u0434\u043E\u043B\u0436\u043D\u043E \u0431\u044B\u0442\u044C \u043B\u043E\u0433\u0438\u043D\u0430 \u0438 \u043F\u0430\u0440\u043E\u043B\u044F" };
+  if (u.port && u.port !== "443")
+    return { ok: false, error: "\u043D\u0435\u0441\u0442\u0430\u043D\u0434\u0430\u0440\u0442\u043D\u044B\u0435 \u043F\u043E\u0440\u0442\u044B \u043D\u0435 \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u044B" };
+  const host = u.hostname.toLowerCase();
+  if (!hosts.includes(host))
+    return { ok: false, error: `\u0445\u043E\u0441\u0442 ${host} \u043D\u0435 \u0440\u0430\u0437\u0440\u0435\u0448\u0451\u043D (\u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u044B: ${hosts.join(", ")})` };
+  const segments = u.pathname.split("/").filter(Boolean);
+  if (segments.length < 2)
+    return { ok: false, error: "\u0432 \u0441\u0441\u044B\u043B\u043A\u0435 \u0434\u043E\u043B\u0436\u043D\u044B \u0431\u044B\u0442\u044C \u0432\u043B\u0430\u0434\u0435\u043B\u0435\u0446 \u0438 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439: https://\u0445\u043E\u0441\u0442/\u0432\u043B\u0430\u0434\u0435\u043B\u0435\u0446/\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439" };
+  const url = `https://${host}/${segments.join("/")}${u.search}`;
+  if (url.length > MAX_REPO_LENGTH)
+    return { ok: false, error: `\u0441\u0441\u044B\u043B\u043A\u0430 \u0434\u043B\u0438\u043D\u043D\u0435\u0435 ${MAX_REPO_LENGTH} \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432` };
+  return { ok: true, value: url };
+}
+function isPublicIp(ip) {
+  const kind = isIP(ip);
+  if (kind === 4) {
+    const [a2, b2] = ip.split(".").map(Number);
+    if (a2 === 0 || a2 === 10 || a2 === 127)
+      return false;
+    if (a2 === 100 && b2 >= 64 && b2 <= 127)
+      return false;
+    if (a2 === 169 && b2 === 254)
+      return false;
+    if (a2 === 172 && b2 >= 16 && b2 <= 31)
+      return false;
+    if (a2 === 192 && (b2 === 168 || b2 === 0 && ip.split(".")[2] === "0"))
+      return false;
+    if (a2 === 198 && (b2 === 18 || b2 === 19))
+      return false;
+    if (a2 >= 224)
+      return false;
+    return true;
+  }
+  if (kind === 6) {
+    const v2 = ip.toLowerCase();
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v2);
+    if (mapped)
+      return isPublicIp(mapped[1]);
+    if (v2 === "::" || v2 === "::1")
+      return false;
+    if (/^f[cd]/.test(v2))
+      return false;
+    if (/^fe[89ab]/.test(v2))
+      return false;
+    if (v2.startsWith("ff"))
+      return false;
+    return true;
+  }
+  return false;
+}
+var defaultResolve = async (host) => (await lookup(host, { all: true })).map((a2) => a2.address);
+async function checkRepo(url, deps = {}) {
+  const doFetch = deps.fetch ?? fetch;
+  const resolve = deps.resolve ?? defaultResolve;
+  const hosts = deps.hosts ?? allowedHosts();
+  const signal = AbortSignal.timeout(deps.timeoutMs ?? 3000);
+  let current = url;
+  try {
+    for (let hop = 0;hop <= 2; hop++) {
+      const u = new URL(current);
+      if (u.protocol !== "https:" || !hosts.includes(u.hostname.toLowerCase()))
+        return { status: "unreachable", detail: "\u0440\u0435\u0434\u0438\u0440\u0435\u043A\u0442 \u043D\u0430 \u043D\u0435\u0440\u0430\u0437\u0440\u0435\u0448\u0451\u043D\u043D\u044B\u0439 \u0445\u043E\u0441\u0442" };
+      const ips = isIP(u.hostname) ? [u.hostname] : await resolve(u.hostname);
+      if (!ips.length || !ips.every(isPublicIp))
+        return { status: "unreachable", detail: "\u0430\u0434\u0440\u0435\u0441 \u0445\u043E\u0441\u0442\u0430 \u043D\u0435 \u043F\u0443\u0431\u043B\u0438\u0447\u043D\u044B\u0439" };
+      let res = await doFetch(current, { method: "HEAD", redirect: "manual", signal });
+      if (res.status === 405 || res.status === 501)
+        res = await doFetch(current, { method: "GET", redirect: "manual", signal });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get("location");
+        if (!loc)
+          return { status: "unreachable", detail: "\u0440\u0435\u0434\u0438\u0440\u0435\u043A\u0442 \u0431\u0435\u0437 \u0430\u0434\u0440\u0435\u0441\u0430" };
+        current = new URL(loc, current).toString();
+        continue;
+      }
+      if (res.status === 404 || res.status === 410)
+        return { status: "not_found" };
+      if (res.status >= 200 && res.status < 300)
+        return { status: "ok" };
+      return { status: "unreachable", detail: `\u043E\u0442\u0432\u0435\u0442 ${res.status}` };
+    }
+    return { status: "unreachable", detail: "\u0441\u043B\u0438\u0448\u043A\u043E\u043C \u043C\u043D\u043E\u0433\u043E \u0440\u0435\u0434\u0438\u0440\u0435\u043A\u0442\u043E\u0432" };
+  } catch (e) {
+    return { status: "unreachable", detail: e?.name === "TimeoutError" ? "\u0442\u0430\u0439\u043C\u0430\u0443\u0442" : "\u043D\u0435\u0442 \u043E\u0442\u0432\u0435\u0442\u0430" };
+  }
+}
+var repoWarningText = (s) => s.status === "ok" ? null : s.status === "not_found" ? "\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D (404)" : `\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u043F\u0440\u043E\u0432\u0435\u0440\u0435\u043D: ${s.detail}`;
 
 // src/text.ts
 var esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -11087,7 +11248,103 @@ var STATUS_NAME = {
   publishing: "\u043F\u0443\u0431\u043B\u0438\u043A\u0443\u0435\u0442\u0441\u044F"
 };
 
+// src/repo-change.ts
+async function requestRepoChange(api, plugin2, raw, submitter, opts = {}) {
+  const v2 = normalizeRepo(raw);
+  if (!v2.ok)
+    return { kind: "error", message: v2.error };
+  if (v2.value === plugin2.repoUrl)
+    return { kind: "error", message: "\u042D\u0442\u043E\u0442 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u0443\u0436\u0435 \u0443\u043A\u0430\u0437\u0430\u043D" };
+  if (await pendingRepoChange(plugin2.id))
+    return { kind: "error", message: "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0441\u043C\u0435\u043D\u0443 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F \u0443\u0436\u0435 \u043D\u0430 \u0440\u0430\u0441\u0441\u043C\u043E\u0442\u0440\u0435\u043D\u0438\u0438" };
+  let warning = null;
+  const status = await checkRepo(v2.value, opts.check);
+  if (status.status === "not_found") {
+    if (!opts.confirmed)
+      return { kind: "confirm", url: v2.value, message: "\u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D (404). \u0422\u043E\u0447\u043D\u043E \u044D\u0442\u0430 \u0441\u0441\u044B\u043B\u043A\u0430?" };
+    warning = "\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D (404), \u0430\u0432\u0442\u043E\u0440 \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u043B \u0441\u0441\u044B\u043B\u043A\u0443";
+  } else {
+    warning = repoWarningText(status);
+  }
+  if (!plugin2.repoUrl || !config().moderation) {
+    await updatePlugin(plugin2.id, { repoUrl: v2.value, repoWarning: warning });
+    await refreshCatalog(api).catch((e) => log("warn", "catalog refresh after repo change failed", { error: errText(e) }));
+    return { kind: "applied" };
+  }
+  const change = await createRepoChange(plugin2.id, v2.value, warning, submitter);
+  if (!change)
+    return { kind: "error", message: "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0441\u043C\u0435\u043D\u0443 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F \u0443\u0436\u0435 \u043D\u0430 \u0440\u0430\u0441\u0441\u043C\u043E\u0442\u0440\u0435\u043D\u0438\u0438" };
+  await notifyModerators(api, change, plugin2);
+  return { kind: "pending" };
+}
+function repoChangeCard(c, plugin2) {
+  return [
+    `\uD83D\uDD17 <b>\u0421\u043C\u0435\u043D\u0430 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F:</b> ${esc(plugin2.name)}`,
+    `id: <code>${esc(plugin2.id)}</code> \xB7 \u0430\u0432\u0442\u043E\u0440: ${esc(plugin2.author)} (<code>${c.submitter}</code>)`,
+    `\u0431\u044B\u043B\u043E: ${plugin2.repoUrl ? `<a href="${esc(plugin2.repoUrl)}">${esc(plugin2.repoUrl)}</a>` : "\u2014"}`,
+    `\u0441\u0442\u0430\u043D\u0435\u0442: <a href="${esc(c.repoUrl)}">${esc(c.repoUrl)}</a>`,
+    c.warning ? `\u26A0\uFE0F ${esc(c.warning)}` : ""
+  ].filter(Boolean).join(`
+`);
+}
+var repoChangeKeyboard = (id) => new import_grammy2.InlineKeyboard().text("\u2705 \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u044C", `a:rok:${id}`).text("\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C", `a:rno:${id}`);
+async function notifyModerators(api, c, plugin2) {
+  const cfg = config();
+  const sent = [];
+  for (const chat of cfg.modChatId ? [cfg.modChatId] : cfg.adminIds) {
+    try {
+      const m = await api.sendMessage(chat, repoChangeCard(c, plugin2), {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        reply_markup: repoChangeKeyboard(c.id)
+      });
+      sent.push({ chat, msg: m.message_id });
+    } catch (e) {
+      log("warn", "cannot notify moderator about repo change", { chat, error: errText(e) });
+    }
+  }
+  await setRepoChangeMods(c.id, sent);
+}
+async function closeCards(api, c, plugin2, status) {
+  for (const m of c.modMsgs) {
+    await api.editMessageText(m.chat, m.msg, `${repoChangeCard(c, plugin2)}
+
+${status}`, {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+      reply_markup: { inline_keyboard: [] }
+    }).catch(() => {});
+  }
+}
+async function approveRepoChange(api, id, modName) {
+  const c = await decideRepoChange(id, "approved");
+  if (!c)
+    return { ok: false, message: "\u0417\u0430\u044F\u0432\u043A\u0430 \u0443\u0436\u0435 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u0430" };
+  const plugin2 = await getPlugin(c.pluginId);
+  if (!plugin2)
+    return { ok: false, message: "\u041F\u043B\u0430\u0433\u0438\u043D \u0443\u0434\u0430\u043B\u0451\u043D" };
+  await updatePlugin(plugin2.id, { repoUrl: c.repoUrl, repoWarning: c.warning });
+  await refreshCatalog(api).catch((e) => log("warn", "catalog refresh after repo approval failed", { error: errText(e) }));
+  await closeCards(api, c, plugin2, `\u2705 \u041E\u0434\u043E\u0431\u0440\u0435\u043D\u043E ${esc(modName)}`);
+  await api.sendMessage(c.submitter, `\u2705 \u041D\u043E\u0432\u044B\u0439 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 ${plugin2.name} \u043E\u0434\u043E\u0431\u0440\u0435\u043D:
+${c.repoUrl}`).catch(() => {});
+  return { ok: true, message: "\u041E\u0434\u043E\u0431\u0440\u0435\u043D\u043E" };
+}
+async function rejectRepoChange(api, id, reason, modName) {
+  const c = await decideRepoChange(id, "rejected", reason);
+  if (!c)
+    return { ok: false, message: "\u0417\u0430\u044F\u0432\u043A\u0430 \u0443\u0436\u0435 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u0430" };
+  const plugin2 = await getPlugin(c.pluginId);
+  if (plugin2)
+    await closeCards(api, c, plugin2, `\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E ${esc(modName)}: ${esc(reason)}`);
+  await api.sendMessage(c.submitter, `\u274C \u0421\u043C\u0435\u043D\u0430 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F \u043F\u043B\u0430\u0433\u0438\u043D\u0430 ${plugin2?.name ?? c.pluginId} \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0430.
+\u041F\u0440\u0438\u0447\u0438\u043D\u0430: ${reason}
+\u0412 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u043F\u0440\u0435\u0436\u043D\u044F\u044F \u0441\u0441\u044B\u043B\u043A\u0430.`).catch(() => {});
+  return { ok: true, message: "\u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E" };
+}
+
 // src/submit.ts
+var import_grammy3 = __toESM(require_mod(), 1);
 async function checkTarget(userId, id, ver) {
   const existing = await getPlugin(id);
   if (existing && existing.owner !== userId)
@@ -11127,16 +11384,32 @@ async function submit(api, input) {
   const problem = await checkTarget(userId, f.id, f.version);
   if (problem)
     return { kind: "error", message: problem };
+  const known = await getPlugin(f.id);
+  let repo = known?.repoUrl ?? null;
+  let repoIsNew = false;
+  if (!repo) {
+    const v2 = normalizeRepo(f.repo ?? "");
+    if (!v2.ok)
+      return { kind: "error", message: `\u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439: ${v2.error}` };
+    repo = v2.value;
+    repoIsNew = true;
+  }
   const created = await createPlugin({
     id: f.id,
     owner: userId,
     name: f.name,
     author: f.author,
     description: f.description,
-    icon: f.icon
+    icon: f.icon,
+    repoUrl: repo,
+    repoWarning: input.repoWarning ?? null
   });
   if (!created && (await getPlugin(f.id))?.owner !== userId)
     return { kind: "error", message: `id \xAB${f.id}\xBB \u0443\u0436\u0435 \u0437\u0430\u043D\u044F\u0442 \u0434\u0440\u0443\u0433\u0438\u043C \u0430\u0432\u0442\u043E\u0440\u043E\u043C` };
+  if (!created && repoIsNew) {
+    await updatePlugin(f.id, { repoUrl: repo, repoWarning: input.repoWarning ?? null });
+    refreshCatalog(api, { waitMs: 0 }).catch(() => {});
+  }
   const grants = header ? header.grants : null;
   let version2;
   try {
@@ -11160,7 +11433,7 @@ async function submit(api, input) {
     previousGrants: await approvedGrants(f.id)
   });
   if (decision.required) {
-    await notifyModerators(api, version2, decision.reasons);
+    await notifyModerators2(api, version2, decision.reasons);
     return { kind: "pending" };
   }
   try {
@@ -11174,11 +11447,18 @@ async function submit(api, input) {
     return { kind: "error", message: errText(e) };
   }
 }
+function repoLines(p2) {
+  return [
+    p2.repoUrl ? `\uD83D\uDD17 <a href="${esc(p2.repoUrl)}">${esc(p2.repoUrl)}</a>` : "\uD83D\uDD17 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D",
+    p2.repoWarning ? `\u26A0\uFE0F ${esc(p2.repoWarning)}` : ""
+  ];
+}
 function modCard(v2, p2, reasons) {
   const risk = analyzeGrants(v2.grants);
   return [
     `\uD83D\uDCE5 <b>\u0417\u0430\u044F\u0432\u043A\u0430:</b> ${esc(p2.name)} <code>${esc(v2.version)}</code>`,
     `id: <code>${esc(p2.id)}</code> \xB7 \u0430\u0432\u0442\u043E\u0440: ${esc(p2.author)} (<code>${v2.submitter}</code>)`,
+    ...repoLines(p2),
     reasons.length ? `\u041F\u0440\u0438\u0447\u0438\u043D\u0430 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438: ${esc(reasons.join("; "))}` : "",
     grantsBlock(v2.grants, risk),
     v2.changelog ? `Changelog: ${esc(v2.changelog)}` : ""
@@ -11186,9 +11466,9 @@ function modCard(v2, p2, reasons) {
 `);
 }
 function modKeyboard(rid) {
-  return new import_grammy2.InlineKeyboard().text("\u2705 \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u044C", `a:ok:${rid}`).text("\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C", `a:no:${rid}`);
+  return new import_grammy3.InlineKeyboard().text("\u2705 \u041E\u0434\u043E\u0431\u0440\u0438\u0442\u044C", `a:ok:${rid}`).text("\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0438\u0442\u044C", `a:no:${rid}`);
 }
-async function notifyModerators(api, v2, reasons) {
+async function notifyModerators2(api, v2, reasons) {
   const p2 = await getPlugin(v2.pluginId);
   if (!p2)
     return;
@@ -11255,7 +11535,7 @@ async function reject(api, rid, reason, modName) {
 }
 
 // src/ui.ts
-var import_grammy3 = __toESM(require_mod(), 1);
+var import_grammy4 = __toESM(require_mod(), 1);
 var PAGE_SIZE = 8;
 
 class Stale extends Error {
@@ -11282,7 +11562,7 @@ function nav(kb, back) {
   return kb.text("\u2302 \u041C\u0435\u043D\u044E", "m:home").row();
 }
 function homeKeyboard(userId) {
-  const kb = new import_grammy3.InlineKeyboard().text("\uD83D\uDCE4 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D", "w:pub").row().text("\uD83D\uDCE6 \u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B", "p:list:0").row().text("\u2139\uFE0F \u041F\u043E\u043C\u043E\u0449\u044C", "m:help").row();
+  const kb = new import_grammy4.InlineKeyboard().text("\uD83D\uDCE4 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D", "w:pub").row().text("\uD83D\uDCE6 \u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B", "p:list:0").row().text("\u2139\uFE0F \u041F\u043E\u043C\u043E\u0449\u044C", "m:help").row();
   if (isAdmin(userId))
     kb.text("\uD83D\uDEE1 \u041C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u044F", "a:home").row();
   return kb;
@@ -11350,7 +11630,29 @@ async function handleAdmin(ctx, action, arg) {
       await setSession(ctx.from.id, "await_reject", { rid: v2.rid });
       if (ctx.chat?.type !== "private")
         return "\u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0431\u043E\u0442\u0430 \u0432 \u043B\u0438\u0447\u043A\u0435 \u0438 \u043F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043F\u0440\u0438\u0447\u0438\u043D\u0443 \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0438\u044F";
-      return screen(ctx, `\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043F\u0440\u0438\u0447\u0438\u043D\u0443 \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0438\u044F \u0434\u043B\u044F <code>${esc(v2.pluginId)} ${esc(v2.version)}</code>.`, new import_grammy4.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", `a:card:${v2.rid}`));
+      return screen(ctx, `\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043F\u0440\u0438\u0447\u0438\u043D\u0443 \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0438\u044F \u0434\u043B\u044F <code>${esc(v2.pluginId)} ${esc(v2.version)}</code>.`, new import_grammy5.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", `a:card:${v2.rid}`));
+    }
+    case "rq":
+      return showRepoQueue(ctx, num(arg ?? "0"));
+    case "rcard":
+      return showRepoCard(ctx, num(arg));
+    case "rok": {
+      const r = await approveRepoChange(ctx.api, num(arg), nameOf(ctx));
+      if (!r.ok)
+        return r.message;
+      if (ctx.callbackQuery?.message && "text" in ctx.callbackQuery.message && !ctx.callbackQuery.message.text?.includes("\u0421\u043C\u0435\u043D\u0430 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F:")) {
+        return showRepoQueue(ctx, 0);
+      }
+      return;
+    }
+    case "rno": {
+      const c = await getRepoChange(num(arg));
+      if (!c || c.status !== "pending")
+        return "\u0417\u0430\u044F\u0432\u043A\u0430 \u0443\u0436\u0435 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u0430";
+      await setSession(ctx.from.id, "await_reject_repo", { id: c.id });
+      if (ctx.chat?.type !== "private")
+        return "\u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u0431\u043E\u0442\u0430 \u0432 \u043B\u0438\u0447\u043A\u0435 \u0438 \u043F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043F\u0440\u0438\u0447\u0438\u043D\u0443 \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0438\u044F";
+      return screen(ctx, `\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043F\u0440\u0438\u0447\u0438\u043D\u0443 \u043E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u0438\u044F \u0441\u043C\u0435\u043D\u044B \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F \u0434\u043B\u044F <code>${esc(c.pluginId)}</code>.`, new import_grammy5.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", `a:rcard:${c.id}`));
     }
     case "all":
       return showAllPlugins(ctx, num(arg ?? "0"));
@@ -11358,7 +11660,7 @@ async function handleAdmin(ctx, action, arg) {
       return showBans(ctx, num(arg ?? "0"));
     case "banadd":
       await setSession(ctx.from.id, "await_ban", {});
-      return screen(ctx, "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 Telegram user id, \u043A\u043E\u0442\u043E\u0440\u043E\u0433\u043E \u043D\u0443\u0436\u043D\u043E \u0437\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C.", new import_grammy4.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", "a:bans:0"));
+      return screen(ctx, "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 Telegram user id, \u043A\u043E\u0442\u043E\u0440\u043E\u0433\u043E \u043D\u0443\u0436\u043D\u043E \u0437\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C.", new import_grammy5.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", "a:bans:0"));
     case "banask":
       return askBan(ctx, num(arg));
     case "banok":
@@ -11387,7 +11689,16 @@ async function onAdminText(ctx, s, text) {
       return void await ctx.reply("\u041F\u0440\u0438\u0447\u0438\u043D\u0430 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u043F\u0443\u0441\u0442\u043E\u0439.");
     await clearSession(ctx.from.id);
     const r = await reject(ctx.api, s.payload.rid, reason, nameOf(ctx));
-    await ctx.reply(r.ok ? "\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E, \u0430\u0432\u0442\u043E\u0440\u0443 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u043E \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u0435." : r.message, { reply_markup: nav(new import_grammy4.InlineKeyboard().text("\u041E\u0447\u0435\u0440\u0435\u0434\u044C", "a:q:0").row()) });
+    await ctx.reply(r.ok ? "\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E, \u0430\u0432\u0442\u043E\u0440\u0443 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u043E \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u0435." : r.message, { reply_markup: nav(new import_grammy5.InlineKeyboard().text("\u041E\u0447\u0435\u0440\u0435\u0434\u044C", "a:q:0").row()) });
+    return;
+  }
+  if (s.state === "await_reject_repo") {
+    const reason = text.trim().slice(0, 300);
+    if (!reason)
+      return void await ctx.reply("\u041F\u0440\u0438\u0447\u0438\u043D\u0430 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u043F\u0443\u0441\u0442\u043E\u0439.");
+    await clearSession(ctx.from.id);
+    const r = await rejectRepoChange(ctx.api, s.payload.id, reason, nameOf(ctx));
+    await ctx.reply(r.ok ? "\u274C \u041E\u0442\u043A\u043B\u043E\u043D\u0435\u043D\u043E, \u0430\u0432\u0442\u043E\u0440\u0443 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u043E \u0443\u0432\u0435\u0434\u043E\u043C\u043B\u0435\u043D\u0438\u0435." : r.message, { reply_markup: nav(new import_grammy5.InlineKeyboard().text("\u0417\u0430\u044F\u0432\u043A\u0438", "a:rq:0").row()) });
     return;
   }
   if (s.state === "await_ban") {
@@ -11400,8 +11711,12 @@ async function onAdminText(ctx, s, text) {
   throw new Stale;
 }
 async function showAdminHome(ctx) {
-  const [{ total: pending }, { total: plugins }] = await Promise.all([listPendingVersions(0, 1), listPlugins({ offset: 0, limit: 1 })]);
-  const kb = new import_grammy4.InlineKeyboard().text(`\uD83D\uDCE5 \u041E\u0447\u0435\u0440\u0435\u0434\u044C \u0437\u0430\u044F\u0432\u043E\u043A (${pending})`, "a:q:0").row().text(`\uD83D\uDCDA \u0412\u0441\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u044B (${plugins})`, "a:all:0").row().text("\uD83D\uDEAB \u0411\u0430\u043D\u044B", "a:bans:0").row().text("\uD83D\uDEE0 \u0421\u0435\u0440\u0432\u0438\u0441", "a:svc").row();
+  const [{ total: pending }, { total: plugins }, { total: repos }] = await Promise.all([
+    listPendingVersions(0, 1),
+    listPlugins({ offset: 0, limit: 1 }),
+    listPendingRepoChanges(0, 1)
+  ]);
+  const kb = new import_grammy5.InlineKeyboard().text(`\uD83D\uDCE5 \u041E\u0447\u0435\u0440\u0435\u0434\u044C \u0437\u0430\u044F\u0432\u043E\u043A (${pending})`, "a:q:0").row().text(`\uD83D\uDD17 \u0421\u043C\u0435\u043D\u0430 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F (${repos})`, "a:rq:0").row().text(`\uD83D\uDCDA \u0412\u0441\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u044B (${plugins})`, "a:all:0").row().text("\uD83D\uDEAB \u0411\u0430\u043D\u044B", "a:bans:0").row().text("\uD83D\uDEE0 \u0421\u0435\u0440\u0432\u0438\u0441", "a:svc").row();
   nav(kb);
   await screen(ctx, "<b>\u041C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u044F</b>", kb);
 }
@@ -11409,7 +11724,7 @@ async function showQueue(ctx, page) {
   const first = await listPendingVersions(0, 1);
   const p2 = clampPage(page, first.total);
   const { rows, total } = await listPendingVersions(p2 * PAGE_SIZE, PAGE_SIZE);
-  const kb = new import_grammy4.InlineKeyboard;
+  const kb = new import_grammy5.InlineKeyboard;
   for (const v2 of rows)
     kb.text(`${v2.pluginName} ${v2.version}`, `a:card:${v2.rid}`).row();
   pagerRow(kb, "a:q", p2, total);
@@ -11422,7 +11737,7 @@ async function showCard(ctx, rid) {
   const p2 = v2 && await getPlugin(v2.pluginId);
   if (!v2 || !p2)
     throw new Stale;
-  const kb = new import_grammy4.InlineKeyboard().text("\uD83D\uDCCE \u0424\u0430\u0439\u043B", `a:file:${rid}`).row();
+  const kb = new import_grammy5.InlineKeyboard().text("\uD83D\uDCCE \u0424\u0430\u0439\u043B", `a:file:${rid}`).row();
   if (v2.status === "pending") {
     const risk = analyzeGrants(v2.grants);
     const reasons = [risk.unknown ? "\u0433\u0440\u0430\u043D\u0442\u044B \u043D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B" : "", risk.unsafe.length ? "unsafe-\u0433\u0440\u0430\u043D\u0442\u044B" : ""].filter(Boolean);
@@ -11437,11 +11752,38 @@ async function showCard(ctx, rid) {
 
 \u0421\u0442\u0430\u0442\u0443\u0441: ${v2.status}`, kb);
 }
+async function showRepoQueue(ctx, page) {
+  const first = await listPendingRepoChanges(0, 1);
+  const p2 = clampPage(page, first.total);
+  const { rows, total } = await listPendingRepoChanges(p2 * PAGE_SIZE, PAGE_SIZE);
+  const kb = new import_grammy5.InlineKeyboard;
+  for (const c of rows)
+    kb.text(c.pluginName, `a:rcard:${c.id}`).row();
+  pagerRow(kb, "a:rq", p2, total);
+  nav(kb, "a:home");
+  await screen(ctx, total ? `<b>\u0421\u043C\u0435\u043D\u0430 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F</b> (${total})` : `<b>\u0421\u043C\u0435\u043D\u0430 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u044F</b>
+\u041F\u0443\u0441\u0442\u043E.`, kb);
+}
+async function showRepoCard(ctx, id) {
+  const c = await getRepoChange(id);
+  const plugin2 = c && await getPlugin(c.pluginId);
+  if (!c || !plugin2)
+    throw new Stale;
+  const kb = new import_grammy5.InlineKeyboard;
+  if (c.status === "pending")
+    for (const b2 of repoChangeKeyboard(id).inline_keyboard[0])
+      kb.text(b2.text, b2.callback_data);
+  kb.row();
+  nav(kb, "a:rq:0");
+  await screen(ctx, c.status === "pending" ? repoChangeCard(c, plugin2) : `${repoChangeCard(c, plugin2)}
+
+\u0421\u0442\u0430\u0442\u0443\u0441: ${c.status}`, kb);
+}
 async function showAllPlugins(ctx, page) {
   const first = await listPlugins({ offset: 0, limit: 1 });
   const p2 = clampPage(page, first.total);
   const { rows, total } = await listPlugins({ offset: p2 * PAGE_SIZE, limit: PAGE_SIZE });
-  const kb = new import_grammy4.InlineKeyboard;
+  const kb = new import_grammy5.InlineKeyboard;
   for (const pl of rows)
     kb.text(`${pl.hidden ? "\uD83D\uDE48 " : ""}${pl.name}`, `p:open:${pl.rid}`).row();
   pagerRow(kb, "a:all", p2, total);
@@ -11452,7 +11794,7 @@ async function showBans(ctx, page) {
   const first = await listBanned(0, 1);
   const p2 = clampPage(page, first.total);
   const { rows, total } = await listBanned(p2 * PAGE_SIZE, PAGE_SIZE);
-  const kb = new import_grammy4.InlineKeyboard;
+  const kb = new import_grammy5.InlineKeyboard;
   for (const u of rows)
     kb.text(`\u0420\u0430\u0437\u0431\u0430\u043D\u0438\u0442\u044C ${u.name ?? u.id}`, `a:unban:${u.id}`).row();
   pagerRow(kb, "a:bans", p2, total);
@@ -11461,10 +11803,10 @@ async function showBans(ctx, page) {
   await screen(ctx, `<b>\u0411\u0430\u043D\u044B</b> (${total})`, kb);
 }
 async function askBan(ctx, userId) {
-  await screen(ctx, `\u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F <code>${userId}</code>? \u041E\u043D \u043D\u0435 \u0441\u043C\u043E\u0436\u0435\u0442 \u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D\u044B.`, new import_grammy4.InlineKeyboard().text("\u0414\u0430, \u0437\u0430\u0431\u0430\u043D\u0438\u0442\u044C", `a:banok:${userId}`).text("\u041D\u0435\u0442", "a:bans:0"));
+  await screen(ctx, `\u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044F <code>${userId}</code>? \u041E\u043D \u043D\u0435 \u0441\u043C\u043E\u0436\u0435\u0442 \u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D\u044B.`, new import_grammy5.InlineKeyboard().text("\u0414\u0430, \u0437\u0430\u0431\u0430\u043D\u0438\u0442\u044C", `a:banok:${userId}`).text("\u041D\u0435\u0442", "a:bans:0"));
 }
 async function showService(ctx) {
-  const kb = new import_grammy4.InlineKeyboard().text("\uD83D\uDD04 \u041F\u0435\u0440\u0435\u0441\u043E\u0431\u0440\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433", "a:rebuild").row().text("\uD83D\uDCBE \u0411\u044D\u043A\u0430\u043F", "a:backup").row().text("\uD83D\uDCE1 \u0421\u0442\u0430\u0442\u0443\u0441 webhook", "a:hook").row();
+  const kb = new import_grammy5.InlineKeyboard().text("\uD83D\uDD04 \u041F\u0435\u0440\u0435\u0441\u043E\u0431\u0440\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433", "a:rebuild").row().text("\uD83D\uDCBE \u0411\u044D\u043A\u0430\u043F", "a:backup").row().text("\uD83D\uDCE1 \u0421\u0442\u0430\u0442\u0443\u0441 webhook", "a:hook").row();
   nav(kb, "a:home");
   await screen(ctx, "<b>\u0421\u0435\u0440\u0432\u0438\u0441</b>", kb);
 }
@@ -11479,7 +11821,7 @@ async function doRebuild(ctx) {
 async function doBackup(ctx) {
   const dump = JSON.stringify(await dumpAll(), null, 1);
   const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  await ctx.replyWithDocument(new import_grammy4.InputFile(new TextEncoder().encode(dump), `backup-${stamp}.json`));
+  await ctx.replyWithDocument(new import_grammy5.InputFile(new TextEncoder().encode(dump), `backup-${stamp}.json`));
 }
 async function showWebhook(ctx) {
   const i = await ctx.api.getWebhookInfo();
@@ -11490,11 +11832,11 @@ async function showWebhook(ctx) {
     i.last_error_message ? `\u26A0\uFE0F \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u044F\u044F \u043E\u0448\u0438\u0431\u043A\u0430: ${esc(i.last_error_message)}` : "\u2705 \u043E\u0448\u0438\u0431\u043E\u043A \u043D\u0435\u0442"
   ].join(`
 `);
-  await screen(ctx, text, nav(new import_grammy4.InlineKeyboard, "a:svc"));
+  await screen(ctx, text, nav(new import_grammy5.InlineKeyboard, "a:svc"));
 }
 
 // src/menu.ts
-var import_grammy6 = __toESM(require_mod(), 1);
+var import_grammy7 = __toESM(require_mod(), 1);
 
 // src/perms.ts
 function canManage(userId, ownerId, admin) {
@@ -11503,7 +11845,7 @@ function canManage(userId, ownerId, admin) {
 }
 
 // src/wizard.ts
-var import_grammy5 = __toESM(require_mod(), 1);
+var import_grammy6 = __toESM(require_mod(), 1);
 import { createHash } from "crypto";
 
 // src/validate.ts
@@ -11586,13 +11928,16 @@ function pickDescription(d) {
 }
 
 // src/wizard.ts
-var NEW_STEPS = ["id", "name", "version", "description", "icon", "changelog"];
+var NEW_STEPS = ["id", "name", "version", "description", "repo", "icon", "changelog"];
 var EXISTING_STEPS = ["id", "version", "changelog"];
+var LEGACY_STEPS = ["id", "repo", "version", "changelog"];
+var CONFIRM = "\x01";
 var LABEL = {
   id: "id \u043F\u043B\u0430\u0433\u0438\u043D\u0430",
   name: "\u041D\u0430\u0437\u0432\u0430\u043D\u0438\u0435",
   version: "\u0412\u0435\u0440\u0441\u0438\u044F",
   description: "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435",
+  repo: "\u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439",
   icon: "\u0418\u043A\u043E\u043D\u043A\u0430",
   changelog: "Changelog"
 };
@@ -11601,6 +11946,7 @@ var HINT = {
   name: "\u0414\u043E 40 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432.",
   version: "semver, \u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440 1.2.0. \u0414\u043B\u044F \u043D\u043E\u0432\u043E\u0433\u043E \u0432\u044B\u043F\u0443\u0441\u043A\u0430 \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C \u0441\u0442\u0440\u043E\u0433\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u0442\u0435\u043A\u0443\u0449\u0435\u0439.",
   description: "\u0414\u043E 500 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432. \u041C\u043E\u0436\u043D\u043E \u043F\u043E \u044F\u0437\u044B\u043A\u0430\u043C: \u0441\u0442\u0440\u043E\u043A\u0438 \xABru: \u2026\xBB \u0438 \xABen: \u2026\xBB. \u041F\u0443\u0441\u0442\u043E\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E.",
+  repo: "\u0421\u0441\u044B\u043B\u043A\u0430 \u043D\u0430 \u043F\u0443\u0431\u043B\u0438\u0447\u043D\u044B\u0439 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u0441 \u0438\u0441\u0445\u043E\u0434\u043D\u0438\u043A\u0430\u043C\u0438: https://github.com/\u0430\u0432\u0442\u043E\u0440/\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea). \u041E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E.",
   icon: "inu://\u0438\u043C\u044F, tg://emoji?id=\u2026 \u0438\u043B\u0438 tg://addstickers?set=\u2026",
   changelog: "\u0414\u043E 300 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432, \u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E."
 };
@@ -11617,7 +11963,7 @@ async function startPublish(ctx, pluginRid) {
   await setSession(uid, "await_file", { pluginRid });
   await screen(ctx, `${title}
 
-\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0444\u0430\u0439\u043B <code>*.inu.js</code> \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u043E\u043C (UTF-8, \u0434\u043E 5 \u041C\u0411).`, new import_grammy5.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel"));
+\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0444\u0430\u0439\u043B <code>*.inu.js</code> \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u043E\u043C (UTF-8, \u0434\u043E 5 \u041C\u0411).`, new import_grammy6.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel"));
 }
 async function cancelWizard(ctx) {
   await clearSession(ctx.from.id);
@@ -11628,7 +11974,7 @@ async function onDocument(ctx) {
   const doc = ctx.message.document;
   const session = await getSession(uid);
   const pluginRid = session?.state === "await_file" ? session.payload.pluginRid : undefined;
-  const reject2 = (msg) => ctx.reply(`\u274C ${msg}`, { reply_markup: nav(new import_grammy5.InlineKeyboard) });
+  const reject2 = (msg) => ctx.reply(`\u274C ${msg}`, { reply_markup: nav(new import_grammy6.InlineKeyboard) });
   if (!/\.inu\.js$/i.test(doc.file_name ?? ""))
     return void await reject2("\u041D\u0443\u0436\u0435\u043D \u0444\u0430\u0439\u043B \u0441 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u0435\u043C .inu.js");
   if ((doc.file_size ?? 0) > MAX_FILE_BYTES)
@@ -11682,7 +12028,8 @@ async function onDocument(ctx) {
 }
 async function adoptExisting(w, p2) {
   w.existing = true;
-  w.steps = EXISTING_STEPS;
+  w.steps = p2.repoUrl ? EXISTING_STEPS : LEGACY_STEPS;
+  w.f.repo = p2.repoUrl ?? undefined;
   w.f.id = p2.id;
   w.f.name = p2.name;
   w.f.author = p2.author;
@@ -11718,7 +12065,7 @@ ${HINT[step]}`;
 
 \u0422\u0435\u043A\u0443\u0449\u0435\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435:
 <code>${esc(value)}</code>`;
-  const kb = new import_grammy5.InlineKeyboard;
+  const kb = new import_grammy6.InlineKeyboard;
   if (w.awaiting) {
     text += `
 
@@ -11776,6 +12123,24 @@ async function applyStep(ctx, w, step, raw) {
       w.f.description = raw.trim();
       return null;
     }
+    case "repo": {
+      const v2 = normalizeRepo(raw);
+      if (!v2.ok)
+        return v2.error;
+      if (w.repoAck === v2.value) {
+        w.repoWarning = "\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D (404), \u0430\u0432\u0442\u043E\u0440 \u043F\u043E\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u043B \u0441\u0441\u044B\u043B\u043A\u0443";
+      } else {
+        const status = await checkRepo(v2.value);
+        if (status.status === "not_found") {
+          w.f.repo = v2.value;
+          w.repoAck = v2.value;
+          return CONFIRM + "\u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D (404). \u0422\u043E\u0447\u043D\u043E \u044D\u0442\u0430 \u0441\u0441\u044B\u043B\u043A\u0430?";
+        }
+        w.repoWarning = repoWarningText(status);
+      }
+      w.f.repo = v2.value;
+      return null;
+    }
     case "icon": {
       const v2 = validateIcon(raw);
       if (!v2.ok)
@@ -11806,10 +12171,8 @@ async function wizAction(ctx, action) {
       if (!step)
         throw new Stale;
       const err = await applyStep(ctx, w, step, w.f[step] ?? "");
-      if (err) {
-        w.awaiting = true;
-        return renderStep(ctx, w, err);
-      }
+      if (err)
+        return stepError(ctx, w, err);
       w.i++;
       w.awaiting = false;
       return renderStep(ctx, w);
@@ -11832,6 +12195,11 @@ async function wizAction(ctx, action) {
       throw new Stale;
   }
 }
+async function stepError(ctx, w, err) {
+  const confirm = err.startsWith(CONFIRM);
+  w.awaiting = !confirm;
+  return renderStep(ctx, w, confirm ? err.slice(CONFIRM.length) : err);
+}
 async function wizText(ctx, payload, text) {
   const w = payload;
   const step = w.steps[w.i];
@@ -11841,7 +12209,7 @@ async function wizText(ctx, payload, text) {
   }
   const err = await applyStep(ctx, w, step, text);
   if (err)
-    return renderStep(ctx, w, err);
+    return stepError(ctx, w, err);
   w.i++;
   w.awaiting = false;
   return renderStep(ctx, w);
@@ -11855,8 +12223,12 @@ function compose(w) {
     version: w.f.version,
     description: description.ok ? description.value : "",
     icon: w.f.icon,
+    repo: w.f.repo,
     changelog: w.f.changelog ?? ""
   };
+}
+async function existingRepo(id) {
+  return (await getPlugin(id))?.repoUrl ?? null;
 }
 async function renderCard(ctx, w) {
   const f = compose(w);
@@ -11867,6 +12239,8 @@ async function renderCard(ctx, w) {
     warnings.push(`@id \u0432 \u0444\u0430\u0439\u043B\u0435 (\xAB${w.header.id}\xBB) \u043D\u0435 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0435\u0442 \u0441 id \u0432 \u043C\u0430\u0440\u043A\u0435\u0442\u0435: \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u0435 \u043F\u043E\u0441\u0442\u0430\u0432\u0438\u0442 \u044D\u0442\u043E \u043A\u0430\u043A \u0434\u0440\u0443\u0433\u043E\u0439 \u043F\u043B\u0430\u0433\u0438\u043D, \u0430 \u043D\u0435 \u043E\u0431\u043D\u043E\u0432\u0438\u0442 \u0441\u0442\u0430\u0440\u044B\u0439.`);
   if (w.header?.version && w.header.version !== f.version)
     warnings.push(`\u0432\u0435\u0440\u0441\u0438\u044F \u0432 \u0444\u0430\u0439\u043B\u0435 (\xAB${w.header.version}\xBB) \u043E\u0442\u043B\u0438\u0447\u0430\u0435\u0442\u0441\u044F \u043E\u0442 \u0432\u0432\u0435\u0434\u0451\u043D\u043D\u043E\u0439.`);
+  if (w.repoWarning && w.f.repo && w.f.repo !== await existingRepo(f.id))
+    warnings.push(w.repoWarning);
   const decision = needsModeration({
     grants,
     hasApproved: await hasApproved(f.id),
@@ -11877,6 +12251,7 @@ async function renderCard(ctx, w) {
     `${w.existing ? "\u041D\u043E\u0432\u0430\u044F \u0432\u0435\u0440\u0441\u0438\u044F \u043F\u043B\u0430\u0433\u0438\u043D\u0430" : "\u041D\u043E\u0432\u044B\u0439 \u043F\u043B\u0430\u0433\u0438\u043D"}: <b>${esc(f.name)}</b> <code>${esc(f.version)}</code>`,
     `id: <code>${esc(f.id)}</code>`,
     `\u0430\u0432\u0442\u043E\u0440: ${esc(f.author)}`,
+    `\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439: ${esc(f.repo)}`,
     `\u0438\u043A\u043E\u043D\u043A\u0430: <code>${esc(f.icon)}</code>`,
     w.f.description ? `\u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435: ${esc(w.f.description)}` : "",
     f.changelog ? `changelog: ${esc(f.changelog)}` : "",
@@ -11889,7 +12264,7 @@ async function renderCard(ctx, w) {
   w.awaiting = false;
   await save(ctx, w);
   await screen(ctx, lines.filter(Boolean).join(`
-`), new import_grammy5.InlineKeyboard().text("\u2705 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C", "w:go").text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel"));
+`), new import_grammy6.InlineKeyboard().text("\u2705 \u041E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u0442\u044C", "w:go").text("\u041E\u0442\u043C\u0435\u043D\u0430", "w:cancel"));
 }
 async function publish(ctx, w) {
   const uid = ctx.from.id;
@@ -11897,8 +12272,8 @@ async function publish(ctx, w) {
     throw new Stale;
   await screen(ctx, "\u23F3 \u041F\u0443\u0431\u043B\u0438\u043A\u0443\u044E\u2026");
   const f = compose(w);
-  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f });
-  const kb = new import_grammy5.InlineKeyboard().text("\uD83D\uDCE6 \u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B", "p:list:0").row().text("\u2302 \u041C\u0435\u043D\u044E", "m:home");
+  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f, repoWarning: w.repoWarning ?? null });
+  const kb = new import_grammy6.InlineKeyboard().text("\uD83D\uDCE6 \u041C\u043E\u0438 \u043F\u043B\u0430\u0433\u0438\u043D\u044B", "p:list:0").row().text("\u2302 \u041C\u0435\u043D\u044E", "m:home");
   if (result.kind === "published") {
     await screen(ctx, `\u2705 <b>${esc(f.name)}</b> ${esc(f.version)} \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u043D \u0432 @${config().channelUsername}.${result.queued ? `
 \u041A\u0430\u0442\u0430\u043B\u043E\u0433 \u043E\u0431\u043D\u043E\u0432\u0438\u0442\u0441\u044F \u0432 \u0442\u0435\u0447\u0435\u043D\u0438\u0435 \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u0438\u0445 \u043C\u0438\u043D\u0443\u0442.` : ""}`, kb);
@@ -11944,7 +12319,7 @@ async function handleCallback(ctx) {
   const uid = ctx.from.id;
   if (scr === "x")
     return;
-  if (scr !== "w")
+  if (scr !== "w" && !(scr === "p" && action === "repoyes"))
     await clearSession(uid);
   switch (scr) {
     case "m":
@@ -11996,14 +12371,38 @@ async function pluginRoute(ctx, action, a1, a2) {
 ${hint}${current ? `
 
 \u0421\u0435\u0439\u0447\u0430\u0441:
-<code>${esc(current)}</code>` : ""}`, new import_grammy6.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", `p:open:${plugin2.rid}`));
+<code>${esc(current)}</code>` : ""}`, new import_grammy7.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", `p:open:${plugin2.rid}`));
+    }
+    case "repo":
+      return showRepo(ctx, num2(a1));
+    case "repoedit": {
+      const { plugin: plugin2, owner } = await accessible(ctx, num2(a1));
+      if (!owner)
+        throw new Stale;
+      await setSession(ctx.from.id, "edit", { field: "repo", rid: plugin2.rid });
+      const now2 = plugin2.repoUrl ? `
+
+\u0421\u0435\u0439\u0447\u0430\u0441:
+${esc(plugin2.repoUrl)}` : "";
+      const note = plugin2.repoUrl ? `
+\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0441\u0441\u044B\u043B\u043A\u0443 \u043D\u0435\u043B\u044C\u0437\u044F, \u0442\u043E\u043B\u044C\u043A\u043E \u0437\u0430\u043C\u0435\u043D\u0438\u0442\u044C.` : "";
+      return screen(ctx, `<b>${esc(plugin2.name)}</b>
+\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u0441\u044B\u043B\u043A\u0443 \u043D\u0430 \u043F\u0443\u0431\u043B\u0438\u0447\u043D\u044B\u0439 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439: https://github.com/\u0430\u0432\u0442\u043E\u0440/\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea).${note}${now2}`, new import_grammy7.InlineKeyboard().text("\u041E\u0442\u043C\u0435\u043D\u0430", `p:repo:${plugin2.rid}`));
+    }
+    case "repoyes": {
+      const { plugin: plugin2, owner } = await accessible(ctx, num2(a1));
+      const s = await getSession(ctx.from.id);
+      if (!owner || !s || s.state !== "repo_confirm" || s.payload.rid !== plugin2.rid)
+        throw new Stale;
+      await clearSession(ctx.from.id);
+      return finishRepoChange(ctx, plugin2, s.payload.url, true);
     }
     case "vers":
       return showVersions(ctx, num2(a1), num2(a2 ?? "0"));
     case "del": {
       const { plugin: plugin2 } = await accessible(ctx, num2(a1));
       return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043F\u043B\u0430\u0433\u0438\u043D <b>${esc(plugin2.name)}</b>?
-\u0412\u0441\u0435 \u0432\u0435\u0440\u0441\u0438\u0438 \u043F\u0440\u043E\u043F\u0430\u0434\u0443\u0442 \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430 \u0438 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0430, \u0441\u0447\u0451\u0442\u0447\u0438\u043A \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043E\u043A \u043E\u0431\u043D\u0443\u043B\u0438\u0442\u0441\u044F.`, new import_grammy6.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `p:delok:${plugin2.rid}`).text("\u041D\u0435\u0442", `p:open:${plugin2.rid}`));
+\u0412\u0441\u0435 \u0432\u0435\u0440\u0441\u0438\u0438 \u043F\u0440\u043E\u043F\u0430\u0434\u0443\u0442 \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430 \u0438 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0430, \u0441\u0447\u0451\u0442\u0447\u0438\u043A \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043E\u043A \u043E\u0431\u043D\u0443\u043B\u0438\u0442\u0441\u044F.`, new import_grammy7.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `p:delok:${plugin2.rid}`).text("\u041D\u0435\u0442", `p:open:${plugin2.rid}`));
     }
     case "delok": {
       const { plugin: plugin2 } = await accessible(ctx, num2(a1));
@@ -12057,7 +12456,7 @@ async function versionRoute(ctx, action, vrid) {
       return showVersion(ctx, vrid);
     }
     case "del":
-      return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0432\u0435\u0440\u0441\u0438\u044E <b>${esc(plugin2.name)} ${esc(v2.version)}</b>? \u0424\u0430\u0439\u043B \u0431\u0443\u0434\u0435\u0442 \u0443\u0434\u0430\u043B\u0451\u043D \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430.`, new import_grammy6.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `v:delok:${vrid}`).text("\u041D\u0435\u0442", `v:open:${vrid}`));
+      return screen(ctx, `\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u0432\u0435\u0440\u0441\u0438\u044E <b>${esc(plugin2.name)} ${esc(v2.version)}</b>? \u0424\u0430\u0439\u043B \u0431\u0443\u0434\u0435\u0442 \u0443\u0434\u0430\u043B\u0451\u043D \u0438\u0437 \u043A\u0430\u043D\u0430\u043B\u0430.`, new import_grammy7.InlineKeyboard().text("\u0414\u0430, \u0443\u0434\u0430\u043B\u0438\u0442\u044C", `v:delok:${vrid}`).text("\u041D\u0435\u0442", `v:open:${vrid}`));
     case "delok": {
       try {
         await unpublishVersion(ctx.api, vrid, "delete");
@@ -12093,14 +12492,14 @@ async function showHelp(ctx) {
     "\u2022 \u0413\u0440\u0430\u043D\u0442\u044B \u043F\u043E\u043A\u0430\u0437\u044B\u0432\u0430\u0435\u0442 \u0441\u0430\u043C\u043E \u043F\u0440\u0438\u043B\u043E\u0436\u0435\u043D\u0438\u0435 \u043F\u0440\u0438 \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0435; \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435 \u043E\u043D\u0438 \u0442\u043E\u043B\u044C\u043A\u043E \u0441\u043F\u0440\u0430\u0432\u043E\u0447\u043D\u044B\u0435."
   ].join(`
 `);
-  await screen(ctx, text, nav(new import_grammy6.InlineKeyboard().url("\uD83D\uDCE3 \u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043D\u0430\u043B", `https://t.me/${config().channelUsername}`).row()));
+  await screen(ctx, text, nav(new import_grammy7.InlineKeyboard().url("\uD83D\uDCE3 \u041E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043D\u0430\u043B", `https://t.me/${config().channelUsername}`).row()));
 }
 async function showMyPlugins(ctx, page) {
   const uid = ctx.from.id;
   const first = await listPlugins({ owner: uid, offset: 0, limit: 1 });
   const p2 = clampPage(page, first.total);
   const { rows, total } = await listPlugins({ owner: uid, offset: p2 * PAGE_SIZE, limit: PAGE_SIZE });
-  const kb = new import_grammy6.InlineKeyboard;
+  const kb = new import_grammy7.InlineKeyboard;
   for (const pl of rows)
     kb.text(`${pl.hidden ? "\uD83D\uDE48 " : ""}${pl.name}`, `p:open:${pl.rid}`).row();
   pagerRow(kb, "p:list", p2, total);
@@ -12118,6 +12517,7 @@ async function showPlugin(ctx, rid) {
     `id: <code>${esc(plugin2.id)}</code>`,
     `\u0430\u0432\u0442\u043E\u0440: ${esc(plugin2.author)}${owner ? "" : ` (<code>${plugin2.owner}</code>)`}`,
     `\u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043A\u0438: ${installs}`,
+    plugin2.repoUrl ? `\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439: ${esc(plugin2.repoUrl)}` : "\u26A0\uFE0F \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D \u2014 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u043D\u0435\u0442 \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435",
     desc ? `
 ${esc(desc)}` : "",
     "",
@@ -12125,10 +12525,11 @@ ${esc(desc)}` : "",
     ...rows.map((v2) => `${STATUS_ICON[v2.status] ?? "\u2022"} <code>${esc(v2.version)}</code> \xB7 ${STATUS_NAME[v2.status] ?? v2.status} \xB7 ${when(v2.date)}`),
     total > rows.length ? `\u2026 \u0438 \u0435\u0449\u0451 ${total - rows.length}` : ""
   ];
-  const kb = new import_grammy6.InlineKeyboard;
+  const kb = new import_grammy7.InlineKeyboard;
   if (owner) {
     kb.text("\u041D\u043E\u0432\u0430\u044F \u0432\u0435\u0440\u0441\u0438\u044F", `p:newv:${rid}`).text("\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435", `p:desc:${rid}`).row();
     kb.text("\u0418\u043A\u043E\u043D\u043A\u0430", `p:icon:${rid}`).text("\u0410\u0432\u0442\u043E\u0440", `p:auth:${rid}`).row();
+    kb.text("\uD83D\uDD17 \u0420\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439", `p:repo:${rid}`).row();
   }
   kb.text("\u0412\u0435\u0440\u0441\u0438\u0438", `p:vers:${rid}:0`).text("\u0423\u0434\u0430\u043B\u0438\u0442\u044C", `p:del:${rid}`).row();
   if (isAdmin(ctx.from.id))
@@ -12139,12 +12540,47 @@ ${esc(desc)}` : "",
 
 `), kb);
 }
+async function showRepo(ctx, rid) {
+  const { plugin: plugin2, owner } = await accessible(ctx, rid);
+  const pending = await pendingRepoChange(plugin2.id);
+  const lines = [
+    `<b>${esc(plugin2.name)}</b> \u2014 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439`,
+    plugin2.repoUrl ? esc(plugin2.repoUrl) : "\u26A0\uFE0F \u041D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D. \u0411\u0435\u0437 \u043D\u0435\u0433\u043E \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u043D\u0435\u0442 \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435.",
+    plugin2.repoWarning ? `\u26A0\uFE0F ${esc(plugin2.repoWarning)}` : "",
+    pending ? `
+\u23F3 \u041D\u0430 \u043C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u0438: ${esc(pending.repoUrl)}` : ""
+  ];
+  const kb = new import_grammy7.InlineKeyboard;
+  if (owner && !pending)
+    kb.text(plugin2.repoUrl ? "\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C" : "\u0423\u043A\u0430\u0437\u0430\u0442\u044C", `p:repoedit:${rid}`).row();
+  nav(kb, `p:open:${rid}`);
+  await screen(ctx, lines.filter(Boolean).join(`
+`), kb);
+}
+async function finishRepoChange(ctx, plugin2, url, confirmed) {
+  const r = await requestRepoChange(ctx.api, plugin2, url, ctx.from.id, { confirmed });
+  if (r.kind === "error") {
+    await setSession(ctx.from.id, "edit", { field: "repo", rid: plugin2.rid });
+    await ctx.reply(`\u26A0\uFE0F ${r.message}
+\u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437 \u0438\u043B\u0438 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043C\u0435\u043D\u044E.`);
+    return;
+  }
+  if (r.kind === "confirm") {
+    await setSession(ctx.from.id, "repo_confirm", { rid: plugin2.rid, url: r.url });
+    await screen(ctx, `\u26A0\uFE0F ${esc(r.message)}
+${esc(r.url)}`, new import_grammy7.InlineKeyboard().text("\u041E\u0441\u0442\u0430\u0432\u0438\u0442\u044C", `p:repoyes:${plugin2.rid}`).text("\u0418\u0437\u043C\u0435\u043D\u0438\u0442\u044C", `p:repoedit:${plugin2.rid}`));
+    return;
+  }
+  if (r.kind === "pending")
+    await ctx.reply("\u23F3 \u041D\u043E\u0432\u044B\u0439 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D \u043D\u0430 \u043C\u043E\u0434\u0435\u0440\u0430\u0446\u0438\u044E. \u0414\u043E \u0440\u0435\u0448\u0435\u043D\u0438\u044F \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435 \u043E\u0441\u0442\u0430\u0451\u0442\u0441\u044F \u043F\u0440\u0435\u0436\u043D\u044F\u044F \u0441\u0441\u044B\u043B\u043A\u0430.");
+  await showRepo(ctx, plugin2.rid);
+}
 async function showVersions(ctx, rid, page) {
   const { plugin: plugin2 } = await accessible(ctx, rid);
   const first = await listVersions(plugin2.id, { offset: 0, limit: 1 });
   const p2 = clampPage(page, first.total);
   const { rows, total } = await listVersions(plugin2.id, { offset: p2 * PAGE_SIZE, limit: PAGE_SIZE });
-  const kb = new import_grammy6.InlineKeyboard;
+  const kb = new import_grammy7.InlineKeyboard;
   for (const v2 of rows)
     kb.text(`${STATUS_ICON[v2.status] ?? "\u2022"} ${v2.version}`, `v:open:${v2.rid}`).row();
   pagerRow(kb, `p:vers:${rid}`, p2, total);
@@ -12160,7 +12596,7 @@ async function showVersion(ctx, vrid) {
     v2.changelog ? `Changelog: ${esc(v2.changelog)}` : "",
     grantsBlock(v2.grants, analyzeGrants(v2.grants))
   ];
-  const kb = new import_grammy6.InlineKeyboard;
+  const kb = new import_grammy7.InlineKeyboard;
   if (v2.status === "approved")
     kb.text("\uD83D\uDE48 \u0421\u043A\u0440\u044B\u0442\u044C", `v:hide:${vrid}`);
   if (v2.status === "hidden")
@@ -12175,7 +12611,7 @@ async function handleText(ctx) {
   const text = ctx.message.text;
   const s = await getSession(uid);
   if (!s) {
-    await ctx.reply("\u041D\u0435 \u043F\u043E\u043D\u044F\u043B. \u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043C\u0435\u043D\u044E:", { reply_markup: new import_grammy6.InlineKeyboard().text("\u2302 \u041C\u0435\u043D\u044E", "m:home") });
+    await ctx.reply("\u041D\u0435 \u043F\u043E\u043D\u044F\u043B. \u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043C\u0435\u043D\u044E:", { reply_markup: new import_grammy7.InlineKeyboard().text("\u2302 \u041C\u0435\u043D\u044E", "m:home") });
     return;
   }
   switch (s.state) {
@@ -12194,6 +12630,10 @@ async function applyEdit(ctx, field, rid, text) {
   const { plugin: plugin2, owner } = await accessible(ctx, rid);
   if (!owner)
     throw new Stale;
+  if (field === "repo") {
+    await clearSession(ctx.from.id);
+    return finishRepoChange(ctx, plugin2, text, false);
+  }
   const err = async (m) => void await ctx.reply(`\u26A0\uFE0F ${m}
 \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0435\u0449\u0451 \u0440\u0430\u0437 \u0438\u043B\u0438 \u043E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043C\u0435\u043D\u044E.`);
   if (field === "description") {
@@ -12224,7 +12664,7 @@ async function applyEdit(ctx, field, rid, text) {
 // src/bot.ts
 var INSTALL_RE = /^install ([a-z0-9._-]{3,64}) (\S{1,64})$/;
 function createBot() {
-  const bot = new import_grammy7.Bot(config().botToken);
+  const bot = new import_grammy8.Bot(config().botToken);
   bot.use(async (ctx, next) => {
     if (!await markUpdateProcessed(ctx.update.update_id))
       return;
@@ -12336,7 +12776,7 @@ async function init() {
   if (handler)
     return handler;
   secret = config().webhookSecret;
-  handler = import_grammy8.webhookCallback(createBot(), "std/http", { timeoutMilliseconds: 55000 });
+  handler = import_grammy9.webhookCallback(createBot(), "std/http", { timeoutMilliseconds: 55000 });
   return handler;
 }
 var webhook_default = {

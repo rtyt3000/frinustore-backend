@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from 'bun:test'
 import { PGlite } from '@electric-sql/pglite'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { setQueryRunner } from '../src/db.ts'
 import * as store from '../src/store.ts'
@@ -9,7 +9,7 @@ import * as store from '../src/store.ts'
 const pg = new PGlite()
 
 beforeAll(async () => {
-  await pg.exec(readFileSync(join(import.meta.dir, '..', 'migrations', '001_init.sql'), 'utf8'))
+  await pg.exec(readdirSync(join(import.meta.dir, '..', 'migrations')).filter((f) => f.endsWith('.sql')).sort().map((f) => readFileSync(join(import.meta.dir, '..', 'migrations', f), 'utf8')).join('\n'))
   setQueryRunner(async (text, params) => (await pg.query(text, params as any[])).rows)
 })
 
@@ -19,14 +19,30 @@ const newVersion = (pluginId: string, version: string, n: number, grants: string
 
 describe('store on postgres', () => {
   test('plugin ownership and ids', async () => {
-    expect(await store.createPlugin({ id: 'a.b.c', owner: 1, name: 'A', author: 'me', description: { ru: 'x' }, icon: 'inu://bot' })).toBe(true)
-    expect(await store.createPlugin({ id: 'a.b.c', owner: 2, name: 'B', author: 'x', description: '', icon: 'inu://bot' })).toBe(false)
+    expect(await store.createPlugin({ id: 'a.b.c', owner: 1, name: 'A', author: 'me', description: { ru: 'x' }, icon: 'inu://bot', repoUrl: 'https://github.com/o/r', repoWarning: null })).toBe(true)
+    expect(await store.createPlugin({ id: 'a.b.c', owner: 2, name: 'B', author: 'x', description: '', icon: 'inu://bot', repoUrl: 'https://github.com/o/r', repoWarning: null })).toBe(false)
     const p = await store.getPlugin('a.b.c')
     expect(p?.owner).toBe(1)
     expect(p?.description).toEqual({ ru: 'x' })
     expect((await store.getPluginByRid(p!.rid))?.id).toBe('a.b.c')
     await store.updatePlugin('a.b.c', { description: 'plain', author: 'new' })
-    expect(await store.getPlugin('a.b.c')).toMatchObject({ description: 'plain', author: 'new' })
+    expect(await store.getPlugin('a.b.c')).toMatchObject({ description: 'plain', author: 'new', repoUrl: 'https://github.com/o/r' })
+    await store.updatePlugin('a.b.c', { repoUrl: 'https://github.com/o/r2', repoWarning: 'w' })
+    expect(await store.getPlugin('a.b.c')).toMatchObject({ repoUrl: 'https://github.com/o/r2', repoWarning: 'w' })
+    await store.updatePlugin('a.b.c', { repoUrl: 'https://github.com/o/r', repoWarning: null })
+  })
+
+  test('repo changes: one pending per plugin, decided exactly once', async () => {
+    const a = await store.createRepoChange('a.b.c', 'https://github.com/o/new', null, 1)
+    expect(a?.status).toBe('pending')
+    expect(await store.createRepoChange('a.b.c', 'https://github.com/o/other', null, 1)).toBeNull()
+    expect((await store.pendingRepoChange('a.b.c'))?.repoUrl).toBe('https://github.com/o/new')
+    expect((await store.listPendingRepoChanges(0, 8)).total).toBe(1)
+    const [x, y] = await Promise.all([store.decideRepoChange(a!.id, 'approved'), store.decideRepoChange(a!.id, 'rejected', 'no')])
+    expect([x, y].filter(Boolean).length).toBe(1)
+    expect(await store.pendingRepoChange('a.b.c')).toBeNull()
+    expect(await store.createRepoChange('a.b.c', 'https://github.com/o/again', null, 1)).not.toBeNull() // decided requests free the slot
+    await store.decideRepoChange((await store.pendingRepoChange('a.b.c'))!.id, 'rejected', 'cleanup')
   })
 
   test('version lifecycle: claim is exclusive', async () => {

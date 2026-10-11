@@ -38,7 +38,7 @@ async function writeCatalogMessage(api: Api, json: string): Promise<void> {
 async function rebuildLocked(api: Api, force: boolean): Promise<boolean> {
   const [plugins, versions, installs] = await Promise.all([store.allPlugins(), store.allVersions(), store.installCounts()])
   const catalog = buildCatalog(
-    plugins.map((p) => ({ id: p.id, name: p.name, author: p.author, description: p.description, icon: p.icon, hidden: p.hidden })),
+    plugins.map((p) => ({ id: p.id, name: p.name, author: p.author, description: p.description, icon: p.icon, repo: p.repoUrl, hidden: p.hidden })),
     versions.map((v) => ({
       pluginId: v.pluginId,
       version: v.version,

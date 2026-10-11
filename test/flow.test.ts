@@ -8,13 +8,14 @@ process.env.DAILY_LIMIT = '50'
 
 import { beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import { PGlite } from '@electric-sql/pglite'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Api } from 'grammy'
 import { setQueryRunner } from '../src/db.ts'
 import { publishVersion, refreshCatalog, removePlugin, unpublishVersion } from '../src/publish.ts'
 import * as store from '../src/store.ts'
 import { approve, reject, submit, type Fields } from '../src/submit.ts'
+import { approveRepoChange, rejectRepoChange, requestRepoChange } from '../src/repo-change.ts'
 import type { Catalog } from '../src/catalog.ts'
 
 const pg = new PGlite()
@@ -46,8 +47,12 @@ function fakeApi() {
     },
     pinChatMessage: async (...args: any[]) => void calls.push({ m: 'pin', args }),
     deleteMessage: async (...args: any[]) => void calls.push({ m: 'deleteMessage', args }),
-    sendMessage: async (...args: any[]) => void calls.push({ m: 'sendMessage', args }),
+    sendMessage: async (...args: any[]) => {
+      calls.push({ m: 'sendMessage', args })
+      return { message_id: nextId++ }
+    },
     editMessageCaption: async (...args: any[]) => void calls.push({ m: 'editCaption', args }),
+    editMessageText: async (...args: any[]) => void calls.push({ m: 'editText', args }),
   }
   return { api: api as unknown as Api, calls, fail, catalog: () => catalog! }
 }
@@ -59,6 +64,7 @@ const fields = (over: Partial<Fields> = {}): Fields => ({
   version: '1.0.0',
   description: '',
   icon: 'inu://bot',
+  repo: 'https://github.com/o/r',
   changelog: '',
   ...over,
 })
@@ -71,12 +77,12 @@ const input = (userId: number, f: Fields, grants: string[] | null = []) => ({
 })
 
 beforeAll(async () => {
-  await pg.exec(readFileSync(join(import.meta.dir, '..', 'migrations', '001_init.sql'), 'utf8'))
+  await pg.exec(readdirSync(join(import.meta.dir, '..', 'migrations')).filter((f) => f.endsWith('.sql')).sort().map((f) => readFileSync(join(import.meta.dir, '..', 'migrations', f), 'utf8')).join('\n'))
   setQueryRunner(async (text, params) => (await pg.query(text, params as any[])).rows)
 })
 
 beforeEach(async () => {
-  await pg.exec('TRUNCATE users, plugins, versions, installs, meta, sessions, jobs RESTART IDENTITY CASCADE')
+  await pg.exec('TRUNCATE users, plugins, versions, repo_changes, installs, meta, sessions, jobs RESTART IDENTITY CASCADE')
 })
 
 describe('publish flow', () => {
@@ -231,5 +237,94 @@ describe('publish flow', () => {
     expect(edits()).toBe(before)
     expect(await refreshCatalog(t.api, { force: true })).toBe('done')
     expect(edits()).toBe(before + 1)
+  })
+
+  test('a plugin cannot be published without a valid repository', async () => {
+    const t = fakeApi()
+    expect(await submit(t.api, input(1, fields({ repo: '' })))).toMatchObject({ kind: 'error', message: expect.stringContaining('Репозиторий') })
+    expect(await submit(t.api, input(1, fields({ repo: 'http://github.com/o/r' })))).toMatchObject({ kind: 'error' })
+    expect(await submit(t.api, input(1, fields({ repo: 'https://github.com/o' })))).toMatchObject({ kind: 'error' })
+    expect(await store.getPlugin('u.plugin')).toBeNull() // nothing half-created
+  })
+})
+
+describe('repository changes', () => {
+  const up = { check: { fetch: async () => new Response(null, { status: 200 }), resolve: async () => ['140.82.121.4'] } }
+  const missing = { check: { fetch: async () => new Response(null, { status: 404 }), resolve: async () => ['140.82.121.4'] } }
+  const published = async (t: ReturnType<typeof fakeApi>) => {
+    await submit(t.api, input(1, fields()))
+    await approve(t.api, (await store.listPendingVersions(0, 1)).rows[0]!.rid, '@m')
+    return (await store.getPlugin('u.plugin'))!
+  }
+
+  test('the catalog carries repo, and a change stays invisible until a moderator approves it', async () => {
+    const t = fakeApi()
+    const plugin = await published(t)
+    expect(t.catalog().plugins[0]!.repo).toBe('https://github.com/o/r')
+
+    const r = await requestRepoChange(t.api, plugin, 'https://github.com/o/new', 1, up)
+    expect(r.kind).toBe('pending')
+    await refreshCatalog(t.api, { force: true })
+    expect(t.catalog().plugins[0]!.repo).toBe('https://github.com/o/r') // old link until the decision
+    expect(t.calls.some((c) => c.m === 'sendMessage' && c.args[0] === 900 && String(c.args[1]).includes('Смена репозитория'))).toBe(true)
+
+    // a second request while one is pending is refused
+    expect((await requestRepoChange(t.api, plugin, 'https://github.com/o/other', 1, up)).kind).toBe('error')
+
+    const change = (await store.pendingRepoChange('u.plugin'))!
+    expect((await approveRepoChange(t.api, change.id, '@m')).ok).toBe(true)
+    expect(t.calls.some((c) => c.m === 'editText' && String(c.args[2]).includes('Одобрено'))).toBe(true) // the moderator card is closed
+    expect(t.catalog().plugins[0]!.repo).toBe('https://github.com/o/new')
+    expect((await approveRepoChange(t.api, change.id, '@m2')).ok).toBe(false)
+  })
+
+  test('a rejected change keeps the old repository and tells the author', async () => {
+    const t = fakeApi()
+    const plugin = await published(t)
+    await requestRepoChange(t.api, plugin, 'https://github.com/o/fake', 1, up)
+    const change = (await store.pendingRepoChange('u.plugin'))!
+    expect((await rejectRepoChange(t.api, change.id, 'подмена', '@m')).ok).toBe(true)
+    expect((await store.getPlugin('u.plugin'))?.repoUrl).toBe('https://github.com/o/r')
+    expect(t.calls.some((c) => c.m === 'sendMessage' && c.args[0] === 1 && String(c.args[1]).includes('подмена'))).toBe(true)
+  })
+
+  test('a 404 asks for confirmation first, then goes to moderation with a warning', async () => {
+    const t = fakeApi()
+    const plugin = await published(t)
+    const ask = await requestRepoChange(t.api, plugin, 'https://github.com/o/typo', 1, missing)
+    expect(ask).toMatchObject({ kind: 'confirm', url: 'https://github.com/o/typo' })
+    expect(await store.pendingRepoChange('u.plugin')).toBeNull() // nothing stored before the author confirms
+    expect((await requestRepoChange(t.api, plugin, 'https://github.com/o/typo', 1, { ...missing, confirmed: true })).kind).toBe('pending')
+    expect((await store.pendingRepoChange('u.plugin'))?.warning).toContain('404')
+    expect(t.calls.some((c) => c.m === 'sendMessage' && c.args[0] === 900 && String(c.args[1]).includes('404'))).toBe(true)
+  })
+
+  test('an unreachable host only warns, it does not block', async () => {
+    const t = fakeApi()
+    const plugin = await published(t)
+    const down = { check: { fetch: async () => new Response(null, { status: 503 }), resolve: async () => ['140.82.121.4'] } }
+    expect((await requestRepoChange(t.api, plugin, 'https://github.com/o/later', 1, down)).kind).toBe('pending')
+    expect((await store.pendingRepoChange('u.plugin'))?.warning).toContain('не проверен')
+  })
+
+  test('same link and invalid links are refused', async () => {
+    const t = fakeApi()
+    const plugin = await published(t)
+    expect((await requestRepoChange(t.api, plugin, 'https://github.com/o/r/', 1, up)).kind).toBe('error') // normalizes to the current one
+    expect((await requestRepoChange(t.api, plugin, 'https://evil.example/o/r', 1)).kind).toBe('error')
+    expect((await requestRepoChange(t.api, plugin, '', 1)).kind).toBe('error') // the link cannot be removed
+    expect(await store.pendingRepoChange('u.plugin')).toBeNull()
+  })
+
+  test('a legacy plugin without a repository is hidden from the catalog until it gets one', async () => {
+    const t = fakeApi()
+    const plugin = await published(t)
+    await pg.query('ALTER TABLE plugins ALTER COLUMN repo_url DROP NOT NULL')
+    await pg.query("UPDATE plugins SET repo_url = NULL WHERE id = 'u.plugin'")
+    await refreshCatalog(t.api, { force: true })
+    expect(t.catalog().plugins).toEqual([])
+    const r = await requestRepoChange(t.api, { ...plugin, repoUrl: null }, 'https://github.com/o/first', 1, up)
+    expect(r.kind).toBe('applied') // first link needs no review: there is nothing to protect
+    expect(t.catalog().plugins[0]!.repo).toBe('https://github.com/o/first')
   })
 })

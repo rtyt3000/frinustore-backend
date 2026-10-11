@@ -1,9 +1,10 @@
 import { InlineKeyboard, type Api } from 'grammy'
 import { config, isAdmin } from './config.ts'
+import { normalizeRepo } from './repo.ts'
 import { now } from './db.ts'
 import { log } from './log.ts'
 import { analyzeGrants, newUnsafe, type PluginHeader } from './plugin-header.ts'
-import { publishVersion, errText } from './publish.ts'
+import { publishVersion, refreshCatalog, errText } from './publish.ts'
 import { compareSemver, maxSemver } from './semver.ts'
 import * as store from './store.ts'
 import { esc, grantsBlock } from './text.ts'
@@ -16,6 +17,7 @@ export interface Fields {
   version: string
   description: Description
   icon: string
+  repo: string
   changelog: string
 }
 
@@ -24,6 +26,8 @@ export interface SubmitInput {
   file: { id: string; sha: string }
   header: PluginHeader | null
   fields: Fields
+  /** non-blocking note from the reachability check, for moderators */
+  repoWarning?: string | null
 }
 
 export type SubmitResult =
@@ -71,6 +75,17 @@ export async function submit(api: Api, input: SubmitInput): Promise<SubmitResult
   const problem = await checkTarget(userId, f.id, f.version)
   if (problem) return { kind: 'error', message: problem }
 
+  // the wizard validates too; this is the last line of defence for new and legacy plugins
+  const known = await store.getPlugin(f.id)
+  let repo = known?.repoUrl ?? null
+  let repoIsNew = false
+  if (!repo) {
+    const v = normalizeRepo(f.repo ?? '')
+    if (!v.ok) return { kind: 'error', message: `Репозиторий: ${v.error}` }
+    repo = v.value
+    repoIsNew = true
+  }
+
   const created = await store.createPlugin({
     id: f.id,
     owner: userId,
@@ -78,8 +93,16 @@ export async function submit(api: Api, input: SubmitInput): Promise<SubmitResult
     author: f.author,
     description: f.description,
     icon: f.icon,
+    repoUrl: repo,
+    repoWarning: input.repoWarning ?? null,
   })
   if (!created && (await store.getPlugin(f.id))?.owner !== userId) return { kind: 'error', message: `id «${f.id}» уже занят другим автором` }
+
+  if (!created && repoIsNew) {
+    // legacy plugin gets its first repository together with this version
+    await store.updatePlugin(f.id, { repoUrl: repo, repoWarning: input.repoWarning ?? null })
+    refreshCatalog(api, { waitMs: 0 }).catch(() => {})
+  }
 
   const grants = header ? header.grants : null
   let version: store.Version
@@ -119,11 +142,19 @@ export async function submit(api: Api, input: SubmitInput): Promise<SubmitResult
   }
 }
 
+export function repoLines(p: store.Plugin): string[] {
+  return [
+    p.repoUrl ? `🔗 <a href="${esc(p.repoUrl)}">${esc(p.repoUrl)}</a>` : '🔗 репозиторий не указан',
+    p.repoWarning ? `⚠️ ${esc(p.repoWarning)}` : '',
+  ]
+}
+
 export function modCard(v: store.Version, p: store.Plugin, reasons: string[]): string {
   const risk = analyzeGrants(v.grants)
   return [
     `📥 <b>Заявка:</b> ${esc(p.name)} <code>${esc(v.version)}</code>`,
     `id: <code>${esc(p.id)}</code> · автор: ${esc(p.author)} (<code>${v.submitter}</code>)`,
+    ...repoLines(p),
     reasons.length ? `Причина проверки: ${esc(reasons.join('; '))}` : '',
     grantsBlock(v.grants, risk),
     v.changelog ? `Changelog: ${esc(v.changelog)}` : '',

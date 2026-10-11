@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { InlineKeyboard, type Context } from 'grammy'
 import { config } from './config.ts'
 import { analyzeGrants, decodeText, MAX_FILE_BYTES, parseHeader, type PluginHeader } from './plugin-header.ts'
+import { checkRepo, normalizeRepo, repoWarningText } from './repo.ts'
 import { compareSemver, maxSemver } from './semver.ts'
 import * as store from './store.ts'
 import { checkTarget, needsModeration, submit, type Fields } from './submit.ts'
@@ -16,7 +17,7 @@ import {
   validateVersion,
 } from './validate.ts'
 
-type Step = 'id' | 'name' | 'version' | 'description' | 'icon' | 'changelog'
+type Step = 'id' | 'name' | 'version' | 'description' | 'repo' | 'icon' | 'changelog'
 
 interface Wiz {
   file: { id: string; sha: string; size: number; name: string }
@@ -25,18 +26,28 @@ interface Wiz {
   steps: Step[]
   i: number
   awaiting: boolean
+  /** a link the author already confirmed despite a 404 from the host */
+  repoAck?: string
+  /** non-blocking note from the reachability check */
+  repoWarning?: string | null
   /** raw text of every field; validated again on use */
   f: Partial<Record<Step | 'author', string>>
 }
 
-const NEW_STEPS: Step[] = ['id', 'name', 'version', 'description', 'icon', 'changelog']
+const NEW_STEPS: Step[] = ['id', 'name', 'version', 'description', 'repo', 'icon', 'changelog']
 const EXISTING_STEPS: Step[] = ['id', 'version', 'changelog']
+/** plugins created before the repository became mandatory must set it with their next version */
+const LEGACY_STEPS: Step[] = ['id', 'repo', 'version', 'changelog']
+
+/** prefix of an applyStep message that asks for a decision instead of blocking */
+const CONFIRM = ''
 
 const LABEL: Record<Step, string> = {
   id: 'id плагина',
   name: 'Название',
   version: 'Версия',
   description: 'Описание',
+  repo: 'Репозиторий',
   icon: 'Иконка',
   changelog: 'Changelog',
 }
@@ -46,6 +57,7 @@ const HINT: Record<Step, string> = {
   name: 'До 40 символов.',
   version: 'semver, например 1.2.0. Для нового выпуска должна быть строго больше текущей.',
   description: 'До 500 символов. Можно по языкам: строки «ru: …» и «en: …». Пустое описание допустимо.',
+  repo: 'Ссылка на публичный репозиторий с исходниками: https://github.com/автор/репозиторий (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea). Обязательно.',
   icon: 'inu://имя, tg://emoji?id=… или tg://addstickers?set=…',
   changelog: 'До 300 символов, необязательно.',
 }
@@ -141,7 +153,8 @@ export async function onDocument(ctx: Context): Promise<void> {
 
 async function adoptExisting(w: Wiz, p: store.Plugin): Promise<void> {
   w.existing = true
-  w.steps = EXISTING_STEPS
+  w.steps = p.repoUrl ? EXISTING_STEPS : LEGACY_STEPS
+  w.f.repo = p.repoUrl ?? undefined
   w.f.id = p.id
   w.f.name = p.name
   w.f.author = p.author
@@ -223,6 +236,24 @@ async function applyStep(ctx: Context, w: Wiz, step: Step, raw: string): Promise
       w.f.description = raw.trim()
       return null
     }
+    case 'repo': {
+      const v = normalizeRepo(raw)
+      if (!v.ok) return v.error
+      if (w.repoAck === v.value) {
+        w.repoWarning = 'репозиторий не найден (404), автор подтвердил ссылку'
+      } else {
+        // the check is a hint: only a clear 404 asks the author to confirm, outages never block
+        const status = await checkRepo(v.value)
+        if (status.status === 'not_found') {
+          w.f.repo = v.value
+          w.repoAck = v.value
+          return CONFIRM + 'Репозиторий не найден (404). Точно эта ссылка?'
+        }
+        w.repoWarning = repoWarningText(status)
+      }
+      w.f.repo = v.value
+      return null
+    }
     case 'icon': {
       const v = validateIcon(raw)
       if (!v.ok) return v.error
@@ -251,10 +282,7 @@ export async function wizAction(ctx: Context, action: string): Promise<string | 
     case 'keep': {
       if (!step) throw new Stale()
       const err = await applyStep(ctx, w, step, w.f[step] ?? '')
-      if (err) {
-        w.awaiting = true
-        return renderStep(ctx, w, err)
-      }
+      if (err) return stepError(ctx, w, err)
       w.i++
       w.awaiting = false
       return renderStep(ctx, w)
@@ -277,6 +305,13 @@ export async function wizAction(ctx: Context, action: string): Promise<string | 
   }
 }
 
+/** a plain error keeps asking for the value; a confirmable one offers «Оставить» / «Изменить» */
+async function stepError(ctx: Context, w: Wiz, err: string): Promise<void> {
+  const confirm = err.startsWith(CONFIRM)
+  w.awaiting = !confirm
+  return renderStep(ctx, w, confirm ? err.slice(CONFIRM.length) : err)
+}
+
 /** free text while the wizard waits for a value */
 export async function wizText(ctx: Context, payload: Wiz, text: string): Promise<void> {
   const w = payload
@@ -286,7 +321,7 @@ export async function wizText(ctx: Context, payload: Wiz, text: string): Promise
     return
   }
   const err = await applyStep(ctx, w, step, text)
-  if (err) return renderStep(ctx, w, err)
+  if (err) return stepError(ctx, w, err)
   w.i++
   w.awaiting = false
   return renderStep(ctx, w)
@@ -303,8 +338,14 @@ function compose(w: Wiz): Fields {
     version: w.f.version!,
     description: description.ok ? description.value : '',
     icon: w.f.icon!,
+    repo: w.f.repo!,
     changelog: w.f.changelog ?? '',
   }
+}
+
+/** the repository already stored for this plugin, if any */
+async function existingRepo(id: string): Promise<string | null> {
+  return (await store.getPlugin(id))?.repoUrl ?? null
 }
 
 async function renderCard(ctx: Context, w: Wiz): Promise<void> {
@@ -315,6 +356,8 @@ async function renderCard(ctx: Context, w: Wiz): Promise<void> {
   if (w.header?.id && w.header.id !== f.id)
     warnings.push(`@id в файле («${w.header.id}») не совпадает с id в маркете: приложение поставит это как другой плагин, а не обновит старый.`)
   if (w.header?.version && w.header.version !== f.version) warnings.push(`версия в файле («${w.header.version}») отличается от введённой.`)
+
+  if (w.repoWarning && w.f.repo && w.f.repo !== (await existingRepo(f.id))) warnings.push(w.repoWarning)
 
   const decision = needsModeration({
     grants,
@@ -327,6 +370,7 @@ async function renderCard(ctx: Context, w: Wiz): Promise<void> {
     `${w.existing ? 'Новая версия плагина' : 'Новый плагин'}: <b>${esc(f.name)}</b> <code>${esc(f.version)}</code>`,
     `id: <code>${esc(f.id)}</code>`,
     `автор: ${esc(f.author)}`,
+    `репозиторий: ${esc(f.repo)}`,
     `иконка: <code>${esc(f.icon)}</code>`,
     w.f.description ? `описание: ${esc(w.f.description)}` : '',
     f.changelog ? `changelog: ${esc(f.changelog)}` : '',
@@ -349,7 +393,7 @@ async function publish(ctx: Context, w: Wiz): Promise<string | void> {
   if (!(await store.clearSession(uid))) throw new Stale()
   await screen(ctx, '⏳ Публикую…')
   const f = compose(w)
-  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f })
+  const result = await submit(ctx.api, { userId: uid, file: { id: w.file.id, sha: w.file.sha }, header: w.header, fields: f, repoWarning: w.repoWarning ?? null })
   const kb = new InlineKeyboard().text('📦 Мои плагины', 'p:list:0').row().text('⌂ Меню', 'm:home')
   if (result.kind === 'published') {
     await screen(

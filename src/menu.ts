@@ -2,6 +2,7 @@ import { InlineKeyboard, type Context } from 'grammy'
 import { config, isAdmin } from './config.ts'
 import { handleAdmin, onAdminText } from './admin.ts'
 import { canManage } from './perms.ts'
+import { requestRepoChange } from './repo-change.ts'
 import { analyzeGrants } from './plugin-header.ts'
 import { PublishError, publishVersion, refreshAfterEdit, removePlugin, unpublishVersion, errText } from './publish.ts'
 import * as store from './store.ts'
@@ -47,7 +48,7 @@ export async function handleCallback(ctx: Context): Promise<string | void> {
   const uid = ctx.from!.id
   if (scr === 'x') return
   // opening any screen other than the wizard abandons a pending text/file prompt: no stuck states
-  if (scr !== 'w') await store.clearSession(uid)
+  if (scr !== 'w' && !(scr === 'p' && action === 'repoyes')) await store.clearSession(uid)
 
   switch (scr) {
     case 'm':
@@ -99,6 +100,27 @@ async function pluginRoute(ctx: Context, action: string, a1?: string, a2?: strin
         `<b>${esc(plugin.name)}</b>\n${hint}${current ? `\n\nСейчас:\n<code>${esc(current)}</code>` : ''}`,
         new InlineKeyboard().text('Отмена', `p:open:${plugin.rid}`),
       )
+    }
+    case 'repo':
+      return showRepo(ctx, num(a1))
+    case 'repoedit': {
+      const { plugin, owner } = await accessible(ctx, num(a1))
+      if (!owner) throw new Stale()
+      await store.setSession(ctx.from!.id, 'edit', { field: 'repo', rid: plugin.rid })
+      const now = plugin.repoUrl ? `\n\nСейчас:\n${esc(plugin.repoUrl)}` : ''
+      const note = plugin.repoUrl ? '\nУдалить ссылку нельзя, только заменить.' : ''
+      return screen(
+        ctx,
+        `<b>${esc(plugin.name)}</b>\nПришлите ссылку на публичный репозиторий: https://github.com/автор/репозиторий (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea).${note}${now}`,
+        new InlineKeyboard().text('Отмена', `p:repo:${plugin.rid}`),
+      )
+    }
+    case 'repoyes': {
+      const { plugin, owner } = await accessible(ctx, num(a1))
+      const s = await store.getSession(ctx.from!.id)
+      if (!owner || !s || s.state !== 'repo_confirm' || s.payload.rid !== plugin.rid) throw new Stale()
+      await store.clearSession(ctx.from!.id)
+      return finishRepoChange(ctx, plugin, s.payload.url, true)
     }
     case 'vers':
       return showVersions(ctx, num(a1), num(a2 ?? '0'))
@@ -218,6 +240,7 @@ export async function showPlugin(ctx: Context, rid: number): Promise<void> {
     `id: <code>${esc(plugin.id)}</code>`,
     `автор: ${esc(plugin.author)}${owner ? '' : ` (<code>${plugin.owner}</code>)`}`,
     `установки: ${installs}`,
+    plugin.repoUrl ? `репозиторий: ${esc(plugin.repoUrl)}` : '⚠️ репозиторий не указан — плагина нет в каталоге',
     desc ? `\n${esc(desc)}` : '',
     '',
     total ? '<b>Версии</b>' : 'Версий пока нет.',
@@ -228,11 +251,48 @@ export async function showPlugin(ctx: Context, rid: number): Promise<void> {
   if (owner) {
     kb.text('Новая версия', `p:newv:${rid}`).text('Описание', `p:desc:${rid}`).row()
     kb.text('Иконка', `p:icon:${rid}`).text('Автор', `p:auth:${rid}`).row()
+    kb.text('🔗 Репозиторий', `p:repo:${rid}`).row()
   }
   kb.text('Версии', `p:vers:${rid}:0`).text('Удалить', `p:del:${rid}`).row()
   if (isAdmin(ctx.from!.id)) kb.text(plugin.hidden ? '👁 Показать плагин' : '🙈 Скрыть плагин', `p:hide:${rid}`).row()
   nav(kb, owner ? 'p:list:0' : 'a:all:0')
   await screen(ctx, lines.join('\n').replace(/\n{3,}/g, '\n\n'), kb)
+}
+
+async function showRepo(ctx: Context, rid: number): Promise<void> {
+  const { plugin, owner } = await accessible(ctx, rid)
+  const pending = await store.pendingRepoChange(plugin.id)
+  const lines = [
+    `<b>${esc(plugin.name)}</b> — репозиторий`,
+    plugin.repoUrl ? esc(plugin.repoUrl) : '⚠️ Не указан. Без него плагина нет в каталоге.',
+    plugin.repoWarning ? `⚠️ ${esc(plugin.repoWarning)}` : '',
+    pending ? `\n⏳ На модерации: ${esc(pending.repoUrl)}` : '',
+  ]
+  const kb = new InlineKeyboard()
+  if (owner && !pending) kb.text(plugin.repoUrl ? 'Изменить' : 'Указать', `p:repoedit:${rid}`).row()
+  nav(kb, `p:open:${rid}`)
+  await screen(ctx, lines.filter(Boolean).join('\n'), kb)
+}
+
+/** shared tail of the text flow and of the «Оставить» button */
+async function finishRepoChange(ctx: Context, plugin: store.Plugin, url: string, confirmed: boolean): Promise<void> {
+  const r = await requestRepoChange(ctx.api, plugin, url, ctx.from!.id, { confirmed })
+  if (r.kind === 'error') {
+    await store.setSession(ctx.from!.id, 'edit', { field: 'repo', rid: plugin.rid })
+    await ctx.reply(`⚠️ ${r.message}\nПопробуйте ещё раз или откройте меню.`)
+    return
+  }
+  if (r.kind === 'confirm') {
+    await store.setSession(ctx.from!.id, 'repo_confirm', { rid: plugin.rid, url: r.url })
+    await screen(
+      ctx,
+      `⚠️ ${esc(r.message)}\n${esc(r.url)}`,
+      new InlineKeyboard().text('Оставить', `p:repoyes:${plugin.rid}`).text('Изменить', `p:repoedit:${plugin.rid}`),
+    )
+    return
+  }
+  if (r.kind === 'pending') await ctx.reply('⏳ Новый репозиторий отправлен на модерацию. До решения в каталоге остаётся прежняя ссылка.')
+  await showRepo(ctx, plugin.rid)
 }
 
 async function showVersions(ctx: Context, rid: number, page: number): Promise<void> {
@@ -287,9 +347,13 @@ export async function handleText(ctx: Context): Promise<void> {
   }
 }
 
-async function applyEdit(ctx: Context, field: 'description' | 'icon' | 'author', rid: number, text: string): Promise<void> {
+async function applyEdit(ctx: Context, field: 'description' | 'icon' | 'author' | 'repo', rid: number, text: string): Promise<void> {
   const { plugin, owner } = await accessible(ctx, rid)
   if (!owner) throw new Stale()
+  if (field === 'repo') {
+    await store.clearSession(ctx.from!.id)
+    return finishRepoChange(ctx, plugin, text, false)
+  }
   const err = async (m: string) => void (await ctx.reply(`⚠️ ${m}\nПопробуйте ещё раз или откройте меню.`))
   if (field === 'description') {
     const v = validateDescription(text)

@@ -13,7 +13,22 @@ export interface Plugin {
   author: string
   description: Description
   icon: string
+  /** null only for plugins created before the repository became mandatory */
+  repoUrl: string | null
+  repoWarning: string | null
   hidden: boolean
+  createdAt: number
+}
+
+export interface RepoChange {
+  id: number
+  pluginId: string
+  repoUrl: string
+  warning: string | null
+  status: 'pending' | 'approved' | 'rejected'
+  submitter: number
+  rejectReason: string | null
+  modMsgs: ModMsg[]
   createdAt: number
 }
 
@@ -47,7 +62,21 @@ const plugin = (r: any): Plugin => ({
   author: r.author,
   description: r.description_json,
   icon: r.icon,
+  repoUrl: r.repo_url ?? null,
+  repoWarning: r.repo_warning ?? null,
   hidden: r.hidden,
+  createdAt: Number(r.created_at),
+})
+
+const repoChange = (r: any): RepoChange => ({
+  id: Number(r.id),
+  pluginId: r.plugin_id,
+  repoUrl: r.repo_url,
+  warning: r.warning,
+  status: r.status,
+  submitter: Number(r.submitter_id),
+  rejectReason: r.reject_reason,
+  modMsgs: r.mod_msgs ?? [],
   createdAt: Number(r.created_at),
 })
 
@@ -108,18 +137,18 @@ export async function getPluginByRid(rid: number): Promise<Plugin | null> {
   return r && plugin(r)
 }
 
-export async function createPlugin(p: Omit<Plugin, 'rid' | 'createdAt' | 'hidden'>): Promise<boolean> {
+export async function createPlugin(p: Omit<Plugin, 'rid' | 'createdAt' | 'hidden'> & { repoUrl: string }): Promise<boolean> {
   const r = await q(
-    `INSERT INTO plugins (id, owner_user_id, name, author, description_json, icon, created_at)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) ON CONFLICT (id) DO NOTHING RETURNING id`,
-    [p.id, p.owner, p.name, p.author, JSON.stringify(p.description), p.icon, now()],
+    `INSERT INTO plugins (id, owner_user_id, name, author, description_json, icon, repo_url, repo_warning, repo_checked_at, created_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $9) ON CONFLICT (id) DO NOTHING RETURNING id`,
+    [p.id, p.owner, p.name, p.author, JSON.stringify(p.description), p.icon, p.repoUrl, p.repoWarning, now()],
   )
   return r.length > 0
 }
 
 export async function updatePlugin(
   id: string,
-  patch: Partial<Pick<Plugin, 'name' | 'author' | 'description' | 'icon' | 'hidden'>>,
+  patch: Partial<Pick<Plugin, 'name' | 'author' | 'description' | 'icon' | 'hidden' | 'repoUrl' | 'repoWarning'>>,
 ): Promise<void> {
   const sets: string[] = []
   const params: unknown[] = [id]
@@ -132,6 +161,11 @@ export async function updatePlugin(
   if (patch.description !== undefined) add('description_json', JSON.stringify(patch.description), '::jsonb')
   if (patch.icon !== undefined) add('icon', patch.icon)
   if (patch.hidden !== undefined) add('hidden', patch.hidden)
+  if (patch.repoUrl !== undefined) {
+    add('repo_url', patch.repoUrl)
+    add('repo_checked_at', now())
+  }
+  if (patch.repoWarning !== undefined) add('repo_warning', patch.repoWarning)
   if (sets.length) await q(`UPDATE plugins SET ${sets.join(', ')} WHERE id = $1`, params)
 }
 
@@ -152,6 +186,47 @@ export async function listPlugins(opts: { owner?: number; offset: number; limit:
 
 export async function allPlugins(): Promise<Plugin[]> {
   return (await q('SELECT * FROM plugins ORDER BY rid')).map(plugin)
+}
+
+// ---- repository changes
+
+export async function createRepoChange(pluginId: string, repoUrl: string, warning: string | null, submitter: number): Promise<RepoChange | null> {
+  const r = await one(
+    `INSERT INTO repo_changes (plugin_id, repo_url, warning, status, submitter_id, created_at)
+     VALUES ($1, $2, $3, 'pending', $4, $5) ON CONFLICT (plugin_id) WHERE status = 'pending' DO NOTHING RETURNING *`,
+    [pluginId, repoUrl, warning, submitter, now()],
+  )
+  return r && repoChange(r)
+}
+
+export async function getRepoChange(id: number): Promise<RepoChange | null> {
+  const r = await one('SELECT * FROM repo_changes WHERE id = $1', [id])
+  return r && repoChange(r)
+}
+
+export async function pendingRepoChange(pluginId: string): Promise<RepoChange | null> {
+  const r = await one("SELECT * FROM repo_changes WHERE plugin_id = $1 AND status = 'pending'", [pluginId])
+  return r && repoChange(r)
+}
+
+/** atomically takes a pending request; null if someone decided first */
+export async function decideRepoChange(id: number, status: 'approved' | 'rejected', reason?: string): Promise<RepoChange | null> {
+  const r = await one("UPDATE repo_changes SET status = $2, reject_reason = $3 WHERE id = $1 AND status = 'pending' RETURNING *", [id, status, reason ?? null])
+  return r && repoChange(r)
+}
+
+export async function setRepoChangeMods(id: number, msgs: ModMsg[]): Promise<void> {
+  await q('UPDATE repo_changes SET mod_msgs = $2::jsonb WHERE id = $1', [id, JSON.stringify(msgs)])
+}
+
+export async function listPendingRepoChanges(offset: number, limit: number): Promise<{ rows: (RepoChange & { pluginName: string })[]; total: number }> {
+  const total = Number((await one<any>("SELECT count(*) AS n FROM repo_changes WHERE status = 'pending'"))!.n)
+  const rows = await q<any>(
+    `SELECT c.*, p.name AS plugin_name FROM repo_changes c JOIN plugins p ON p.id = c.plugin_id
+     WHERE c.status = 'pending' ORDER BY c.created_at, c.id LIMIT $1 OFFSET $2`,
+    [limit, offset],
+  )
+  return { rows: rows.map((r) => ({ ...repoChange(r), pluginName: r.plugin_name })), total }
 }
 
 // ---- versions
@@ -391,7 +466,7 @@ export async function cleanup(): Promise<void> {
 
 export async function dumpAll(): Promise<Record<string, unknown[]>> {
   const out: Record<string, unknown[]> = {}
-  for (const t of ['users', 'plugins', 'versions', 'installs', 'meta', 'sessions']) {
+  for (const t of ['users', 'plugins', 'versions', 'repo_changes', 'installs', 'meta', 'sessions']) {
     out[t] = await q(`SELECT * FROM ${t}`)
   }
   return out

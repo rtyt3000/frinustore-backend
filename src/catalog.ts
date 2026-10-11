@@ -16,6 +16,8 @@ export interface CatalogPlugin {
   author: string
   description: Description
   icon?: string
+  /** https link to the source repository; plugins without one are not listed */
+  repo: string
   installs: number
   versions: CatalogVersion[]
 }
@@ -34,6 +36,7 @@ export interface PluginRow {
   author: string
   description: Description
   icon: string
+  repo: string | null
   hidden: boolean
 }
 
@@ -47,7 +50,7 @@ export interface VersionRow {
   status: string
 }
 
-/** only approved versions of non-hidden plugins; plugins without one are left out */
+/** only approved versions of non-hidden plugins that have a repository; others are left out */
 export function buildCatalog(
   plugins: PluginRow[],
   versions: VersionRow[],
@@ -56,7 +59,7 @@ export function buildCatalog(
 ): Catalog {
   const out: CatalogPlugin[] = []
   for (const p of plugins) {
-    if (p.hidden) continue
+    if (p.hidden || !p.repo) continue
     const vs = versions
       .filter((v) => v.pluginId === p.id && v.status === 'approved' && v.msgId !== null)
       .sort((a, b) => b.date - a.date || compareSemver(b.version, a.version))
@@ -73,6 +76,7 @@ export function buildCatalog(
       author: p.author,
       description: p.description,
       icon: p.icon,
+      repo: p.repo,
       installs: installs.get(p.id) ?? 0,
       versions: vs,
     })
