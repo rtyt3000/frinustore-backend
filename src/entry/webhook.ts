@@ -1,6 +1,6 @@
 import { webhookCallback } from 'grammy'
-import { createBot } from '../src/bot.ts'
-import { config } from '../src/config.ts'
+import { createBot } from '../bot.ts'
+import { config } from '../config.ts'
 
 const REQUIRED = ['BOT_TOKEN', 'WEBHOOK_SECRET', 'DATABASE_URL', 'CHANNEL_ID']
 

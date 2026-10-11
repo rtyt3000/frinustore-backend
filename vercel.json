@@ -3,8 +3,8 @@
   "buildCommand": "bun run migrate",
   "outputDirectory": "public",
   "functions": {
-    "api/webhook.ts": { "maxDuration": 60 },
-    "api/cron/flush.ts": { "maxDuration": 60 }
+    "api/webhook.js": { "maxDuration": 60 },
+    "api/cron/flush.js": { "maxDuration": 60 }
   },
   "crons": [{ "path": "/api/cron/flush", "schedule": "0 4 * * *" }]
 }

@@ -11,5 +11,5 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["api", "src", "scripts", "test"]
+  "include": ["src", "scripts", "test"]
 }

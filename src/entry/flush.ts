@@ -1,8 +1,8 @@
 import { Api } from 'grammy'
-import { config } from '../../src/config.ts'
-import { log } from '../../src/log.ts'
-import { refreshCatalog, runJobs } from '../../src/publish.ts'
-import * as store from '../../src/store.ts'
+import { config } from '../config.ts'
+import { log } from '../log.ts'
+import { refreshCatalog, runJobs } from '../publish.ts'
+import * as store from '../store.ts'
 
 // Vercel Cron: batches the installs counter into catalog.json and drains the jobs queue.
 export default {
