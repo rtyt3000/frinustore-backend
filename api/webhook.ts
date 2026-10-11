@@ -1,4 +1,6 @@
 import { webhookCallback } from 'grammy'
+import { createBot } from '../src/bot.ts'
+import { config } from '../src/config.ts'
 
 const REQUIRED = ['BOT_TOKEN', 'WEBHOOK_SECRET', 'DATABASE_URL', 'CHANNEL_ID']
 
@@ -6,12 +8,10 @@ type Handler = (request: Request) => Promise<Response>
 let handler: Handler | undefined
 let secret = ''
 
-// Initialised lazily and inside try/catch: a failure at module load would only show up as
-// FUNCTION_INVOCATION_FAILED without any log line.
+// Imports must stay static (Vercel only bundles those); the bot itself is created lazily inside
+// try/catch so a missing env var is logged instead of surfacing as FUNCTION_INVOCATION_FAILED.
 async function init(): Promise<Handler> {
   if (handler) return handler
-  const { createBot } = await import('../src/bot.ts')
-  const { config } = await import('../src/config.ts')
   secret = config().webhookSecret
   // Telegram retries on non-2xx, and updates are deduplicated by update_id, so business errors
   // never surface as a failure.
