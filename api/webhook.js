@@ -11990,6 +11990,19 @@ function canManage(userId, ownerId, admin) {
   return { allowed: owner || admin, owner };
 }
 
+// src/icon.ts
+function iconFromSticker(sticker) {
+  if (sticker.custom_emoji_id)
+    return { ok: true, value: `tg://emoji?id=${sticker.custom_emoji_id}` };
+  if (sticker.set_name)
+    return { ok: true, value: `tg://addstickers?set=${sticker.set_name}` };
+  return { ok: false, error: "\u0443 \u044D\u0442\u043E\u0433\u043E \u0441\u0442\u0438\u043A\u0435\u0440\u0430 \u043D\u0435\u0442 \u043D\u0430\u0431\u043E\u0440\u0430 \u2014 \u043F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u0442\u0438\u043A\u0435\u0440 \u0438\u0437 \u043D\u0430\u0431\u043E\u0440\u0430 \u0438\u043B\u0438 \u043A\u0430\u0441\u0442\u043E\u043C\u043D\u044B\u0439 \u044D\u043C\u043E\u0434\u0437\u0438" };
+}
+function iconFromEntities(text, entities) {
+  const e = entities?.find((x2) => x2.type === "custom_emoji" && x2.custom_emoji_id);
+  return e ? `tg://emoji?id=${e.custom_emoji_id}` : null;
+}
+
 // src/validate.ts
 var ok = (value) => ({ ok: true, value });
 var fail = (error) => ({ ok: false, error });
@@ -12204,7 +12217,7 @@ var HINT = {
   version: "semver, \u043D\u0430\u043F\u0440\u0438\u043C\u0435\u0440 1.2.0. \u0414\u043B\u044F \u043D\u043E\u0432\u043E\u0433\u043E \u0432\u044B\u043F\u0443\u0441\u043A\u0430 \u0434\u043E\u043B\u0436\u043D\u0430 \u0431\u044B\u0442\u044C \u0441\u0442\u0440\u043E\u0433\u043E \u0431\u043E\u043B\u044C\u0448\u0435 \u0442\u0435\u043A\u0443\u0449\u0435\u0439.",
   description: "\u0414\u043E 500 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432. \u041C\u043E\u0436\u043D\u043E \u043F\u043E \u044F\u0437\u044B\u043A\u0430\u043C: \u0441\u0442\u0440\u043E\u043A\u0438 \xABru: \u2026\xBB \u0438 \xABen: \u2026\xBB. \u041F\u0443\u0441\u0442\u043E\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E.",
   repo: "\u0421\u0441\u044B\u043B\u043A\u0430 \u043D\u0430 \u043F\u0443\u0431\u043B\u0438\u0447\u043D\u044B\u0439 \u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 \u0441 \u0438\u0441\u0445\u043E\u0434\u043D\u0438\u043A\u0430\u043C\u0438: https://github.com/\u0430\u0432\u0442\u043E\u0440/\u0440\u0435\u043F\u043E\u0437\u0438\u0442\u043E\u0440\u0438\u0439 (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea). \u041E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E.",
-  icon: "inu://\u0438\u043C\u044F, tg://emoji?id=\u2026 \u0438\u043B\u0438 tg://addstickers?set=\u2026",
+  icon: "\u041F\u0440\u043E\u0441\u0442\u043E \u043F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u0442\u0438\u043A\u0435\u0440 (\u0438\u043A\u043E\u043D\u043A\u043E\u0439 \u0441\u0442\u0430\u043D\u0435\u0442 \u0435\u0433\u043E \u043D\u0430\u0431\u043E\u0440) \u0438\u043B\u0438 \u043A\u0430\u0441\u0442\u043E\u043C\u043D\u044B\u0439 \u044D\u043C\u043E\u0434\u0437\u0438 (\u0438\u043A\u043E\u043D\u043A\u043E\u0439 \u0441\u0442\u0430\u043D\u0435\u0442 \u043E\u043D \u0441\u0430\u043C). \u041B\u0438\u0431\u043E \u0432\u0440\u0443\u0447\u043D\u0443\u044E: inu://\u0438\u043C\u044F, tg://emoji?id=\u2026 \u0438\u043B\u0438 tg://addstickers?set=\u2026",
   screenshots: "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043E\u0442 1 \u0434\u043E 8 \u0441\u043A\u0440\u0438\u043D\u0448\u043E\u0442\u043E\u0432 \u043A\u0430\u043A \u0444\u043E\u0442\u043E (\u043D\u0435 \u0444\u0430\u0439\u043B\u043E\u043C): \u0434\u043E 10 \u041C\u0411, \u043C\u0435\u043D\u044C\u0448\u0430\u044F \u0441\u0442\u043E\u0440\u043E\u043D\u0430 \u043D\u0435 \u043C\u0435\u043D\u0435\u0435 320 px. \u0428\u0430\u0433 \u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0439; \u043F\u043E\u0437\u0436\u0435 \u0438\u0445 \u043C\u043E\u0436\u043D\u043E \u0438\u0437\u043C\u0435\u043D\u0438\u0442\u044C \u0432 \u044D\u043A\u0440\u0430\u043D\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u0430.",
   changelog: "\u0414\u043E 300 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432, \u043D\u0435\u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u043E."
 };
@@ -12507,9 +12520,31 @@ async function stepError(ctx, w, err) {
   w.awaiting = !confirm;
   return renderStep(ctx, w, confirm ? err.slice(CONFIRM.length) : err);
 }
+async function wizSticker(ctx, w) {
+  if (w.steps[w.i] !== "icon") {
+    await ctx.reply("\u0421\u0442\u0438\u043A\u0435\u0440 \u043D\u0443\u0436\u0435\u043D \u0442\u043E\u043B\u044C\u043A\u043E \u043D\u0430 \u0448\u0430\u0433\u0435 \xAB\u0418\u043A\u043E\u043D\u043A\u0430\xBB. \u0421\u043B\u0435\u0434\u0443\u0439\u0442\u0435 \u0448\u0430\u0433\u0430\u043C \u043C\u0430\u0441\u0442\u0435\u0440\u0430 \u0438\u043B\u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041E\u0442\u043C\u0435\u043D\u0430\xBB.");
+    return;
+  }
+  const icon = iconFromSticker(ctx.message.sticker);
+  if (!icon.ok)
+    return void await ctx.reply(`\u26A0\uFE0F ${icon.error}`);
+  const err = await applyStep(ctx, w, "icon", icon.value);
+  if (err)
+    return stepError(ctx, w, err);
+  w.i++;
+  w.awaiting = false;
+  return renderStep(ctx, w);
+}
 async function wizText(ctx, payload, text) {
   const w = payload;
   const step = w.steps[w.i];
+  if (step === "icon") {
+    const fromEmoji = iconFromEntities(text, ctx.message?.entities);
+    if (fromEmoji) {
+      text = fromEmoji;
+      w.awaiting = true;
+    }
+  }
   if (!step || !w.awaiting) {
     await ctx.reply("\u0418\u0441\u043F\u043E\u043B\u044C\u0437\u0443\u0439\u0442\u0435 \u043A\u043D\u043E\u043F\u043A\u0438 \u043F\u043E\u0434 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435\u043C \u043C\u0430\u0441\u0442\u0435\u0440\u0430 \u0438\u043B\u0438 /cancel.");
     return;
@@ -12676,7 +12711,7 @@ async function pluginRoute(ctx, action, a1, a2) {
       const field = action === "desc" ? "description" : action === "icon" ? "icon" : "author";
       await setSession(ctx.from.id, "edit", { field, rid: plugin2.rid });
       const current = field === "description" ? descriptionToText(plugin2.description) : field === "icon" ? plugin2.icon : plugin2.author;
-      const hint = field === "description" ? "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 (\u0434\u043E 500 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432) \u0438\u043B\u0438 \u0441\u0442\u0440\u043E\u043A\u0438 \xABru: \u2026\xBB / \xABen: \u2026\xBB." : field === "icon" ? "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0438\u043A\u043E\u043D\u043A\u0443: inu://\u0438\u043C\u044F, tg://emoji?id=\u2026 \u0438\u043B\u0438 tg://addstickers?set=\u2026" : "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043E\u0442\u043E\u0431\u0440\u0430\u0436\u0430\u0435\u043C\u043E\u0435 \u0438\u043C\u044F \u0430\u0432\u0442\u043E\u0440\u0430 (\u0434\u043E 40 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432).";
+      const hint = field === "description" ? "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043E\u043F\u0438\u0441\u0430\u043D\u0438\u0435 (\u0434\u043E 500 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432) \u0438\u043B\u0438 \u0441\u0442\u0440\u043E\u043A\u0438 \xABru: \u2026\xBB / \xABen: \u2026\xBB." : field === "icon" ? "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0441\u0442\u0438\u043A\u0435\u0440 (\u0438\u043A\u043E\u043D\u043A\u043E\u0439 \u0441\u0442\u0430\u043D\u0435\u0442 \u0435\u0433\u043E \u043D\u0430\u0431\u043E\u0440) \u0438\u043B\u0438 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 \u0441 \u043A\u0430\u0441\u0442\u043E\u043C\u043D\u044B\u043C \u044D\u043C\u043E\u0434\u0437\u0438 (\u0438\u043A\u043E\u043D\u043A\u043E\u0439 \u0441\u0442\u0430\u043D\u0435\u0442 \u043E\u043D \u0441\u0430\u043C). \u041B\u0438\u0431\u043E \u0432\u0440\u0443\u0447\u043D\u0443\u044E: inu://\u0438\u043C\u044F, tg://emoji?id=\u2026 \u0438\u043B\u0438 tg://addstickers?set=\u2026" : "\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u043E\u0442\u043E\u0431\u0440\u0430\u0436\u0430\u0435\u043C\u043E\u0435 \u0438\u043C\u044F \u0430\u0432\u0442\u043E\u0440\u0430 (\u0434\u043E 40 \u0441\u0438\u043C\u0432\u043E\u043B\u043E\u0432).";
       return screen(ctx, `<b>${esc(plugin2.name)}</b>
 ${hint}${current ? `
 
@@ -13045,6 +13080,20 @@ async function handlePhoto(ctx) {
     reply_markup: new import_grammy7.InlineKeyboard().text("\u2302 \u041C\u0435\u043D\u044E", "m:home")
   });
 }
+async function handleSticker(ctx) {
+  const s = await getSession(ctx.from.id);
+  if (s?.state === "wiz")
+    return wizSticker(ctx, s.payload);
+  if (s?.state === "edit" && s.payload.field === "icon") {
+    const icon = iconFromSticker(ctx.message.sticker);
+    if (!icon.ok)
+      return void await ctx.reply(`\u26A0\uFE0F ${icon.error}`);
+    return applyEdit(ctx, "icon", s.payload.rid, icon.value);
+  }
+  await ctx.reply("\u0421\u0442\u0438\u043A\u0435\u0440 \u043C\u043E\u0436\u043D\u043E \u043F\u0440\u0438\u0441\u043B\u0430\u0442\u044C \u043D\u0430 \u0448\u0430\u0433\u0435 \xAB\u0418\u043A\u043E\u043D\u043A\u0430\xBB \u0432 \u043C\u0430\u0441\u0442\u0435\u0440\u0435 \u0438\u043B\u0438 \u0432 \u044D\u043A\u0440\u0430\u043D\u0435 \u043F\u043B\u0430\u0433\u0438\u043D\u0430 \u2192 \xAB\u0418\u043A\u043E\u043D\u043A\u0430\xBB.", {
+    reply_markup: new import_grammy7.InlineKeyboard().text("\u2302 \u041C\u0435\u043D\u044E", "m:home")
+  });
+}
 async function handleText(ctx) {
   const uid = ctx.from.id;
   const text = ctx.message.text;
@@ -13060,7 +13109,7 @@ async function handleText(ctx) {
       await ctx.reply("\u041F\u0440\u0438\u0448\u043B\u0438\u0442\u0435 \u0444\u0430\u0439\u043B <code>.inu.js</code> \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u043E\u043C \u0438\u043B\u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 \xAB\u041E\u0442\u043C\u0435\u043D\u0430\xBB \u0432 \u043C\u0435\u043D\u044E.", { parse_mode: "HTML" });
       return;
     case "edit":
-      return applyEdit(ctx, s.payload.field, s.payload.rid, text);
+      return applyEdit(ctx, s.payload.field, s.payload.rid, s.payload.field === "icon" ? iconFromEntities(text, ctx.message?.entities) ?? text : text);
     default:
       return onAdminText(ctx, s, text);
   }
@@ -13178,6 +13227,7 @@ function createBot() {
   bot.command("backup", adminOnly((ctx) => doBackup(ctx)));
   bot.on("message:document", onDocument);
   bot.on("message:photo", handlePhoto);
+  bot.on("message:sticker", handleSticker);
   bot.on("message:text", handleText);
   bot.on("callback_query:data", async (ctx) => {
     let alert;

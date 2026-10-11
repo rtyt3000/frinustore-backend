@@ -2,7 +2,7 @@ import { Bot, InlineKeyboard, type Context } from 'grammy'
 import { askBan, doBackup, doRebuild } from './admin.ts'
 import { config, isAdmin } from './config.ts'
 import { log } from './log.ts'
-import { handleCallback, handlePhoto, handleText, showMyPlugins } from './menu.ts'
+import { handleCallback, handlePhoto, handleSticker, handleText, showMyPlugins } from './menu.ts'
 import { errText } from './publish.ts'
 import * as store from './store.ts'
 import { Stale, showHome } from './ui.ts'
@@ -95,6 +95,7 @@ export function createBot(): Bot {
 
   bot.on('message:document', onDocument)
   bot.on('message:photo', handlePhoto)
+  bot.on('message:sticker', handleSticker)
   bot.on('message:text', handleText)
 
   bot.on('callback_query:data', async (ctx) => {

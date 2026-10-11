@@ -15,6 +15,7 @@ import { setQueryRunner } from '../src/db.ts'
 import { publishVersion, refreshCatalog, removePlugin, unpublishVersion } from '../src/publish.ts'
 import * as store from '../src/store.ts'
 import { approve, reject, submit, type Fields } from '../src/submit.ts'
+import { wizSticker, wizText } from '../src/wizard.ts'
 import { addScreenshot, deleteScreenshot, moveScreenshot } from '../src/screenshots.ts'
 import { approveRepoChange, rejectRepoChange, requestRepoChange } from '../src/repo-change.ts'
 import type { Catalog } from '../src/catalog.ts'
@@ -458,3 +459,53 @@ describe('screenshots flow', () => {
     expect(await store.listScreenshots('u.plugin')).toEqual([])
   })
 })
+
+describe('icon from a sticker in the wizard', () => {
+  const fakeCtx = (message: any) => {
+    const replies: string[] = []
+    const ctx: any = { from: { id: 1 }, message, api: {}, reply: async (t: string) => void replies.push(t) }
+    return { ctx, replies }
+  }
+  const wiz = (step: number): any => ({
+    file: { id: 'f', sha: 's', size: 1, name: 'a.inu.js' },
+    header: null,
+    existing: false,
+    steps: ['icon', 'changelog'],
+    i: step,
+    awaiting: false,
+    f: { icon: 'inu://bot' },
+  })
+
+  test('a sticker sets tg://addstickers and moves on', async () => {
+    const { ctx, replies } = fakeCtx({ sticker: { set_name: 'Pack' } })
+    const w = wiz(0)
+    await wizSticker(ctx, w)
+    expect(w.f.icon).toBe('tg://addstickers?set=Pack')
+    expect(w.i).toBe(1)
+    expect(replies.join()).toContain('Changelog')
+  })
+
+  test('a custom emoji sticker sets tg://emoji', async () => {
+    const { ctx } = fakeCtx({ sticker: { custom_emoji_id: '777', set_name: 'Pack' } })
+    const w = wiz(0)
+    await wizSticker(ctx, w)
+    expect(w.f.icon).toBe('tg://emoji?id=777')
+  })
+
+  test('a custom emoji in the text works even before pressing «Изменить»', async () => {
+    const { ctx } = fakeCtx({ entities: [{ type: 'custom_emoji', custom_emoji_id: '999' }] })
+    const w = wiz(0)
+    await wizText(ctx, w, '😀')
+    expect(w.f.icon).toBe('tg://emoji?id=999')
+    expect(w.i).toBe(1)
+  })
+
+  test('a sticker on another step is refused and changes nothing', async () => {
+    const { ctx, replies } = fakeCtx({ sticker: { set_name: 'Pack' } })
+    const w = wiz(1)
+    await wizSticker(ctx, w)
+    expect(w.f.icon).toBe('inu://bot')
+    expect(replies.join()).toContain('«Иконка»')
+  })
+})
+

@@ -4,6 +4,7 @@ import { handleAdmin, onAdminText } from './admin.ts'
 import { canManage } from './perms.ts'
 import { requestRepoChange } from './repo-change.ts'
 import { log } from './log.ts'
+import { iconFromEntities, iconFromSticker } from './icon.ts'
 import { analyzeGrants } from './plugin-header.ts'
 import { buildPreview } from './preview.ts'
 import { addScreenshot, checkPhoto, deleteScreenshot, moveScreenshot } from './screenshots.ts'
@@ -11,7 +12,7 @@ import { PublishError, publishVersion, refreshAfterEdit, removePlugin, unpublish
 import * as store from './store.ts'
 import { STATUS_ICON, STATUS_NAME, esc, grantsBlock, when } from './text.ts'
 import { PAGE_SIZE, Stale, btn, clampPage, label, nav, pagerRow, screen, showHome } from './ui.ts'
-import { cancelWizard, startPublish, wizAction, wizPhoto, wizText } from './wizard.ts'
+import { cancelWizard, startPublish, wizAction, wizPhoto, wizSticker, wizText } from './wizard.ts'
 import { descriptionToText, pickDescription, validateAuthor, validateDescription, validateIcon } from './validate.ts'
 
 const num = (s: string | undefined): number => {
@@ -98,7 +99,7 @@ async function pluginRoute(ctx: Context, action: string, a1?: string, a2?: strin
         field === 'description'
           ? 'Пришлите описание (до 500 символов) или строки «ru: …» / «en: …».'
           : field === 'icon'
-            ? 'Пришлите иконку: inu://имя, tg://emoji?id=… или tg://addstickers?set=…'
+            ? 'Пришлите стикер (иконкой станет его набор) или сообщение с кастомным эмодзи (иконкой станет он сам). Либо вручную: inu://имя, tg://emoji?id=… или tg://addstickers?set=…'
             : 'Пришлите отображаемое имя автора (до 40 символов).'
       return screen(
         ctx,
@@ -456,6 +457,22 @@ export async function handlePhoto(ctx: Context): Promise<void> {
   })
 }
 
+// ---- stickers
+
+/** a sticker is an icon: the wizard's icon step and the «Иконка» edit take it without asking for an id */
+export async function handleSticker(ctx: Context): Promise<void> {
+  const s = await store.getSession(ctx.from!.id)
+  if (s?.state === 'wiz') return wizSticker(ctx, s.payload)
+  if (s?.state === 'edit' && s.payload.field === 'icon') {
+    const icon = iconFromSticker(ctx.message!.sticker!)
+    if (!icon.ok) return void (await ctx.reply(`⚠️ ${icon.error}`))
+    return applyEdit(ctx, 'icon', s.payload.rid, icon.value)
+  }
+  await ctx.reply('Стикер можно прислать на шаге «Иконка» в мастере или в экране плагина → «Иконка».', {
+    reply_markup: new InlineKeyboard().text('⌂ Меню', 'm:home'),
+  })
+}
+
 // ---- free text
 
 export async function handleText(ctx: Context): Promise<void> {
@@ -473,7 +490,7 @@ export async function handleText(ctx: Context): Promise<void> {
       await ctx.reply('Пришлите файл <code>.inu.js</code> документом или нажмите «Отмена» в меню.', { parse_mode: 'HTML' })
       return
     case 'edit':
-      return applyEdit(ctx, s.payload.field, s.payload.rid, text)
+      return applyEdit(ctx, s.payload.field, s.payload.rid, s.payload.field === 'icon' ? (iconFromEntities(text, ctx.message?.entities) ?? text) : text)
     default:
       return onAdminText(ctx, s, text)
   }

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { InlineKeyboard, type Context } from 'grammy'
 import { config } from './config.ts'
 import { analyzeGrants, decodeText, MAX_FILE_BYTES, parseHeader, type PluginHeader } from './plugin-header.ts'
+import { iconFromEntities, iconFromSticker } from './icon.ts'
 import { checkRepo, normalizeRepo, repoWarningText } from './repo.ts'
 import { checkPhoto } from './screenshots.ts'
 import { compareSemver, maxSemver } from './semver.ts'
@@ -62,7 +63,7 @@ const HINT: Record<Step, string> = {
   version: 'semver, например 1.2.0. Для нового выпуска должна быть строго больше текущей.',
   description: 'До 500 символов. Можно по языкам: строки «ru: …» и «en: …». Пустое описание допустимо.',
   repo: 'Ссылка на публичный репозиторий с исходниками: https://github.com/автор/репозиторий (GitHub, GitLab, Codeberg, Bitbucket, SourceHut, Gitea). Обязательно.',
-  icon: 'inu://имя, tg://emoji?id=… или tg://addstickers?set=…',
+  icon: 'Просто пришлите стикер (иконкой станет его набор) или кастомный эмодзи (иконкой станет он сам). Либо вручную: inu://имя, tg://emoji?id=… или tg://addstickers?set=…',
   screenshots: 'Пришлите от 1 до 8 скриншотов как фото (не файлом): до 10 МБ, меньшая сторона не менее 320 px. Шаг необязательный; позже их можно изменить в экране плагина.',
   changelog: 'До 300 символов, необязательно.',
 }
@@ -358,10 +359,33 @@ async function stepError(ctx: Context, w: Wiz, err: string): Promise<void> {
   return renderStep(ctx, w, confirm ? err.slice(CONFIRM.length) : err)
 }
 
+/** a sticker on the icon step: its set (or itself, for a custom emoji sticker) becomes the icon */
+export async function wizSticker(ctx: Context, w: Wiz): Promise<void> {
+  if (w.steps[w.i] !== 'icon') {
+    await ctx.reply('Стикер нужен только на шаге «Иконка». Следуйте шагам мастера или нажмите «Отмена».')
+    return
+  }
+  const icon = iconFromSticker(ctx.message!.sticker!)
+  if (!icon.ok) return void (await ctx.reply(`⚠️ ${icon.error}`))
+  const err = await applyStep(ctx, w, 'icon', icon.value)
+  if (err) return stepError(ctx, w, err)
+  w.i++
+  w.awaiting = false
+  return renderStep(ctx, w)
+}
+
 /** free text while the wizard waits for a value */
 export async function wizText(ctx: Context, payload: Wiz, text: string): Promise<void> {
   const w = payload
   const step = w.steps[w.i]
+  // a custom emoji in the message is the icon; no need to know its id
+  if (step === 'icon') {
+    const fromEmoji = iconFromEntities(text, ctx.message?.entities)
+    if (fromEmoji) {
+      text = fromEmoji
+      w.awaiting = true
+    }
+  }
   if (!step || !w.awaiting) {
     await ctx.reply('Используйте кнопки под сообщением мастера или /cancel.')
     return
