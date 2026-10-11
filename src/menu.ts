@@ -1,0 +1,314 @@
+import { InlineKeyboard, type Context } from 'grammy'
+import { config, isAdmin } from './config.ts'
+import { handleAdmin, onAdminText } from './admin.ts'
+import { canManage } from './perms.ts'
+import { analyzeGrants } from './plugin-header.ts'
+import { PublishError, publishVersion, refreshAfterEdit, removePlugin, unpublishVersion, errText } from './publish.ts'
+import * as store from './store.ts'
+import { STATUS_ICON, STATUS_NAME, esc, grantsBlock, when } from './text.ts'
+import { PAGE_SIZE, Stale, clampPage, nav, pagerRow, screen, showHome } from './ui.ts'
+import { cancelWizard, startPublish, wizAction, wizText } from './wizard.ts'
+import { descriptionToText, pickDescription, validateAuthor, validateDescription, validateIcon } from './validate.ts'
+
+const num = (s: string | undefined): number => {
+  const n = Number(s)
+  if (!Number.isInteger(n)) throw new Stale()
+  return n
+}
+
+/** owner of the plugin or a moderator; checked on every callback, not only when the button is drawn */
+async function accessible(ctx: Context, rid: number): Promise<{ plugin: store.Plugin; owner: boolean }> {
+  const plugin = await store.getPluginByRid(rid)
+  const uid = ctx.from!.id
+  if (!plugin) throw new Stale()
+  const { allowed, owner } = canManage(uid, plugin.owner, isAdmin(uid))
+  if (!allowed) throw new Stale()
+  return { plugin, owner }
+}
+
+async function versionAccess(ctx: Context, vrid: number) {
+  const v = await store.getVersion(vrid)
+  if (!v) throw new Stale()
+  const plugin = await store.getPlugin(v.pluginId)
+  if (!plugin) throw new Stale()
+  const uid = ctx.from!.id
+  const { allowed, owner } = canManage(uid, plugin.owner, isAdmin(uid))
+  if (!allowed) throw new Stale()
+  return { v, plugin, owner }
+}
+
+export const modName = (ctx: Context): string => (ctx.from!.username ? `@${ctx.from!.username}` : ctx.from!.first_name)
+
+// ---- router
+
+/** returns an alert text to show on the callback, if any */
+export async function handleCallback(ctx: Context): Promise<string | void> {
+  const [scr, action, a1, a2] = ctx.callbackQuery!.data!.split(':')
+  const uid = ctx.from!.id
+  if (scr === 'x') return
+  // opening any screen other than the wizard abandons a pending text/file prompt: no stuck states
+  if (scr !== 'w') await store.clearSession(uid)
+
+  switch (scr) {
+    case 'm':
+      if (action === 'home') return showHome(ctx)
+      if (action === 'help') return showHelp(ctx)
+      break
+    case 'w':
+      if (action === 'pub') return startPublish(ctx)
+      if (action === 'cancel') return cancelWizard(ctx)
+      return wizAction(ctx, action!)
+    case 'p':
+      return pluginRoute(ctx, action!, a1, a2)
+    case 'v':
+      return versionRoute(ctx, action!, num(a1))
+    case 'a':
+      if (!isAdmin(uid)) throw new Stale()
+      return handleAdmin(ctx, action!, a1)
+  }
+  throw new Stale()
+}
+
+async function pluginRoute(ctx: Context, action: string, a1?: string, a2?: string): Promise<string | void> {
+  switch (action) {
+    case 'list':
+      return showMyPlugins(ctx, num(a1))
+    case 'open':
+      return showPlugin(ctx, num(a1))
+    case 'newv': {
+      const { plugin, owner } = await accessible(ctx, num(a1))
+      if (!owner) throw new Stale()
+      return startPublish(ctx, plugin.rid)
+    }
+    case 'desc':
+    case 'icon':
+    case 'auth': {
+      const { plugin, owner } = await accessible(ctx, num(a1))
+      if (!owner) throw new Stale()
+      const field = action === 'desc' ? 'description' : action === 'icon' ? 'icon' : 'author'
+      await store.setSession(ctx.from!.id, 'edit', { field, rid: plugin.rid })
+      const current = field === 'description' ? descriptionToText(plugin.description) : field === 'icon' ? plugin.icon : plugin.author
+      const hint =
+        field === 'description'
+          ? 'Пришлите описание (до 500 символов) или строки «ru: …» / «en: …».'
+          : field === 'icon'
+            ? 'Пришлите иконку: inu://имя, tg://emoji?id=… или tg://addstickers?set=…'
+            : 'Пришлите отображаемое имя автора (до 40 символов).'
+      return screen(
+        ctx,
+        `<b>${esc(plugin.name)}</b>\n${hint}${current ? `\n\nСейчас:\n<code>${esc(current)}</code>` : ''}`,
+        new InlineKeyboard().text('Отмена', `p:open:${plugin.rid}`),
+      )
+    }
+    case 'vers':
+      return showVersions(ctx, num(a1), num(a2 ?? '0'))
+    case 'del': {
+      const { plugin } = await accessible(ctx, num(a1))
+      return screen(
+        ctx,
+        `Удалить плагин <b>${esc(plugin.name)}</b>?\nВсе версии пропадут из канала и каталога, счётчик установок обнулится.`,
+        new InlineKeyboard().text('Да, удалить', `p:delok:${plugin.rid}`).text('Нет', `p:open:${plugin.rid}`),
+      )
+    }
+    case 'delok': {
+      const { plugin } = await accessible(ctx, num(a1))
+      try {
+        await removePlugin(ctx.api, plugin.id)
+      } catch (e) {
+        if (e instanceof PublishError) return e.message
+        throw e
+      }
+      return showMyPlugins(ctx, 0)
+    }
+    case 'hide': {
+      if (!isAdmin(ctx.from!.id)) throw new Stale()
+      const { plugin } = await accessible(ctx, num(a1))
+      await store.updatePlugin(plugin.id, { hidden: !plugin.hidden })
+      await refreshAfterEdit(ctx.api)
+      return showPlugin(ctx, plugin.rid)
+    }
+  }
+  throw new Stale()
+}
+
+async function versionRoute(ctx: Context, action: string, vrid: number): Promise<string | void> {
+  const { v, plugin, owner } = await versionAccess(ctx, vrid)
+  const mod = isAdmin(ctx.from!.id)
+  switch (action) {
+    case 'open':
+      return showVersion(ctx, vrid)
+    case 'hide':
+    case 'show': {
+      try {
+        if (action === 'hide') {
+          if (v.status !== 'approved') throw new Stale()
+          await unpublishVersion(ctx.api, vrid, 'hide')
+          // a moderator hiding someone else's version: the author cannot undo it
+          if (!owner && mod) await store.setVersionStatus(vrid, 'hidden', { rejectReason: 'mod' })
+        } else {
+          if (v.status !== 'hidden') throw new Stale()
+          if (v.rejectReason === 'mod' && !mod) return 'Версия скрыта модератором'
+          await publishVersion(ctx.api, vrid, 'hidden')
+        }
+      } catch (e) {
+        if (e instanceof PublishError) return e.message
+        throw e
+      }
+      return showVersion(ctx, vrid)
+    }
+    case 'del':
+      return screen(
+        ctx,
+        `Удалить версию <b>${esc(plugin.name)} ${esc(v.version)}</b>? Файл будет удалён из канала.`,
+        new InlineKeyboard().text('Да, удалить', `v:delok:${vrid}`).text('Нет', `v:open:${vrid}`),
+      )
+    case 'delok': {
+      try {
+        await unpublishVersion(ctx.api, vrid, 'delete')
+      } catch (e) {
+        if (e instanceof PublishError) return e.message
+        throw e
+      }
+      return showVersions(ctx, plugin.rid, 0)
+    }
+  }
+  throw new Stale()
+}
+
+// ---- screens
+
+async function showHelp(ctx: Context): Promise<void> {
+  const text = [
+    '<b>Как опубликовать плагин</b>',
+    '1. «Опубликовать плагин» → пришлите файл <code>*.inu.js</code> (UTF-8, до 5 МБ).',
+    '2. Подтвердите id, название, версию, описание, иконку и changelog. Значения подставляются из заголовка файла, если он разобран.',
+    '3. Новые плагины и версии с новыми <code>unsafe.*</code> грантами проверяет модератор.',
+    '',
+    '<b>Заголовок файла</b>',
+    '<pre>// ==InuPlugin==\n// @name    My plugin\n// @id      me.myplugin\n// @version 1.0.0\n// @grant   fetch(example.com)\n// ==/InuPlugin==</pre>',
+    '',
+    '<b>Правила</b>',
+    '• Версия должна быть строго больше предыдущей (semver).',
+    '• id занят первым автором; чужой id публиковать нельзя.',
+    '• Держите <code>@id</code> в файле неизменным — по нему приложение решает, обновить плагин или поставить новый.',
+    '• Гранты показывает само приложение при установке; в каталоге они только справочные.',
+  ].join('\n')
+  await screen(ctx, text, nav(new InlineKeyboard().url('📣 Открыть канал', `https://t.me/${config().channelUsername}`).row()))
+}
+
+export async function showMyPlugins(ctx: Context, page: number): Promise<void> {
+  const uid = ctx.from!.id
+  const first = await store.listPlugins({ owner: uid, offset: 0, limit: 1 })
+  const p = clampPage(page, first.total)
+  const { rows, total } = await store.listPlugins({ owner: uid, offset: p * PAGE_SIZE, limit: PAGE_SIZE })
+  const kb = new InlineKeyboard()
+  for (const pl of rows) kb.text(`${pl.hidden ? '🙈 ' : ''}${pl.name}`, `p:open:${pl.rid}`).row()
+  pagerRow(kb, 'p:list', p, total)
+  kb.text('📤 Опубликовать плагин', 'w:pub').row()
+  nav(kb)
+  await screen(ctx, total ? `<b>Мои плагины</b> (${total})` : '<b>Мои плагины</b>\nПока пусто — опубликуйте первый.', kb)
+}
+
+export async function showPlugin(ctx: Context, rid: number): Promise<void> {
+  const { plugin, owner } = await accessible(ctx, rid)
+  const [{ rows, total }, installs] = await Promise.all([store.listVersions(plugin.id, { offset: 0, limit: 5 }), store.installCount(plugin.id)])
+  const desc = pickDescription(plugin.description)
+  const lines = [
+    `<b>${esc(plugin.name)}</b>${plugin.hidden ? ' 🙈 скрыт' : ''}`,
+    `id: <code>${esc(plugin.id)}</code>`,
+    `автор: ${esc(plugin.author)}${owner ? '' : ` (<code>${plugin.owner}</code>)`}`,
+    `установки: ${installs}`,
+    desc ? `\n${esc(desc)}` : '',
+    '',
+    total ? '<b>Версии</b>' : 'Версий пока нет.',
+    ...rows.map((v) => `${STATUS_ICON[v.status] ?? '•'} <code>${esc(v.version)}</code> · ${STATUS_NAME[v.status] ?? v.status} · ${when(v.date)}`),
+    total > rows.length ? `… и ещё ${total - rows.length}` : '',
+  ]
+  const kb = new InlineKeyboard()
+  if (owner) {
+    kb.text('Новая версия', `p:newv:${rid}`).text('Описание', `p:desc:${rid}`).row()
+    kb.text('Иконка', `p:icon:${rid}`).text('Автор', `p:auth:${rid}`).row()
+  }
+  kb.text('Версии', `p:vers:${rid}:0`).text('Удалить', `p:del:${rid}`).row()
+  if (isAdmin(ctx.from!.id)) kb.text(plugin.hidden ? '👁 Показать плагин' : '🙈 Скрыть плагин', `p:hide:${rid}`).row()
+  nav(kb, owner ? 'p:list:0' : 'a:all:0')
+  await screen(ctx, lines.join('\n').replace(/\n{3,}/g, '\n\n'), kb)
+}
+
+async function showVersions(ctx: Context, rid: number, page: number): Promise<void> {
+  const { plugin } = await accessible(ctx, rid)
+  const first = await store.listVersions(plugin.id, { offset: 0, limit: 1 })
+  const p = clampPage(page, first.total)
+  const { rows, total } = await store.listVersions(plugin.id, { offset: p * PAGE_SIZE, limit: PAGE_SIZE })
+  const kb = new InlineKeyboard()
+  for (const v of rows) kb.text(`${STATUS_ICON[v.status] ?? '•'} ${v.version}`, `v:open:${v.rid}`).row()
+  pagerRow(kb, `p:vers:${rid}`, p, total)
+  nav(kb, `p:open:${rid}`)
+  await screen(ctx, `<b>${esc(plugin.name)}</b> — версии (${total})`, kb)
+}
+
+async function showVersion(ctx: Context, vrid: number): Promise<void> {
+  const { v, plugin } = await versionAccess(ctx, vrid)
+  const lines = [
+    `<b>${esc(plugin.name)}</b> <code>${esc(v.version)}</code>`,
+    `${STATUS_ICON[v.status] ?? ''} ${STATUS_NAME[v.status] ?? v.status} · ${when(v.date)}`,
+    v.rejectReason && v.status === 'rejected' ? `Причина: ${esc(v.rejectReason)}` : '',
+    v.changelog ? `Changelog: ${esc(v.changelog)}` : '',
+    grantsBlock(v.grants, analyzeGrants(v.grants)),
+  ]
+  const kb = new InlineKeyboard()
+  if (v.status === 'approved') kb.text('🙈 Скрыть', `v:hide:${vrid}`)
+  if (v.status === 'hidden') kb.text('👁 Показать', `v:show:${vrid}`)
+  kb.text('Удалить', `v:del:${vrid}`).row()
+  nav(kb, `p:vers:${plugin.rid}:0`)
+  await screen(ctx, lines.filter(Boolean).join('\n'), kb)
+}
+
+// ---- free text
+
+export async function handleText(ctx: Context): Promise<void> {
+  const uid = ctx.from!.id
+  const text = ctx.message!.text!
+  const s = await store.getSession(uid)
+  if (!s) {
+    await ctx.reply('Не понял. Откройте меню:', { reply_markup: new InlineKeyboard().text('⌂ Меню', 'm:home') })
+    return
+  }
+  switch (s.state) {
+    case 'wiz':
+      return wizText(ctx, s.payload, text)
+    case 'await_file':
+      await ctx.reply('Пришлите файл <code>.inu.js</code> документом или нажмите «Отмена» в меню.', { parse_mode: 'HTML' })
+      return
+    case 'edit':
+      return applyEdit(ctx, s.payload.field, s.payload.rid, text)
+    default:
+      return onAdminText(ctx, s, text)
+  }
+}
+
+async function applyEdit(ctx: Context, field: 'description' | 'icon' | 'author', rid: number, text: string): Promise<void> {
+  const { plugin, owner } = await accessible(ctx, rid)
+  if (!owner) throw new Stale()
+  const err = async (m: string) => void (await ctx.reply(`⚠️ ${m}\nПопробуйте ещё раз или откройте меню.`))
+  if (field === 'description') {
+    const v = validateDescription(text)
+    if (!v.ok) return err(v.error)
+    await store.updatePlugin(plugin.id, { description: v.value })
+  } else if (field === 'icon') {
+    const v = validateIcon(text)
+    if (!v.ok) return err(v.error)
+    await store.updatePlugin(plugin.id, { icon: v.value })
+  } else {
+    const v = validateAuthor(text)
+    if (!v.ok) return err(v.error)
+    await store.updatePlugin(plugin.id, { author: v.value })
+  }
+  await store.clearSession(ctx.from!.id)
+  try {
+    await refreshAfterEdit(ctx.api)
+  } catch (e) {
+    await ctx.reply(`Сохранено, но каталог не обновился: ${errText(e)}`)
+  }
+  await showPlugin(ctx, rid)
+}

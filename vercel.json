@@ -1,0 +1,9 @@
+{
+  "bunVersion": "1.x",
+  "buildCommand": "bun run migrate",
+  "functions": {
+    "api/webhook.ts": { "maxDuration": 60 },
+    "api/cron/flush.ts": { "maxDuration": 60 }
+  },
+  "crons": [{ "path": "/api/cron/flush", "schedule": "0 4 * * *" }]
+}
